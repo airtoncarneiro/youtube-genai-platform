@@ -1,0 +1,15 @@
+bundle:
+  name: youtube-genai-platform
+
+sync:
+  exclude:
+    - .venv/**
+    - __pycache__/**
+    - .vscode/**
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://dbc-6b8e3ad9-e334.cloud.databricks.com
