@@ -1,0 +1,47 @@
+# This is a Declarative Automation Bundle definition for youtube_etl_genai.
+# The Databricks extension requires databricks.yml configuration file.
+# See https://docs.databricks.com/dev-tools/bundles/index.html for documentation.
+
+bundle:
+  name: youtube_etl_genai
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://dbc-6b8e3ad9-e334.cloud.databricks.com
+
+  ## Optionally, there could be 'staging' or 'prod' targets here.
+  #
+  # prod:
+  #   workspace:
+  #     host: https://dbc-6b8e3ad9-e334.cloud.databricks.com
+
+sync:
+  exclude:
+    - .databricks/**
+    - .vscode/**
+    - .venv/**
+    - .git/**
+    - .pytest_cache/**
+    - .mypy_cache/**
+    - .ruff_cache/**
+    - "**/__pycache__/**"
+    - "**/*.pyc"
+    - .env
+    - .env.*
+    - scratch/**
+    - tests/**
+    - dist/**
+    - "*.code-workspace"
+    - README.md
+
+artifacts:
+  default:
+    type: whl
+    build: poetry build
+    path: .

@@ -1,0 +1,15 @@
+.databricks/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+dist/
+build/
+*.egg-info/
+.env
+.env.*
+!.env.example
+.ipynb_checkpoints/
+.DS_Store

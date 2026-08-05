@@ -1,0 +1,24 @@
+resources:
+  jobs:
+    youtube_ingestion:
+      name: "${bundle.target}-youtube-ingestion"
+      tasks:
+        - task_key: fetch_youtube
+          environment_key: default
+          python_wheel_task:
+            package_name: youtube_etl_genai
+            entry_point: run
+            named_parameters:
+              batch_size: "20"
+              # Zero means complete pagination. Use a positive value only for
+              # a deliberately bounded development or recovery run.
+              max_comments_per_video: "20"
+              max_replies_per_comment: "5"
+              secret_scope: "youtube_api_key"
+              secret_key: "api-key"
+      environments:
+        - environment_key: default
+          spec:
+              environment_version: "5"
+              dependencies:
+                - ../dist/*.whl
