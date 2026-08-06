@@ -50,7 +50,7 @@ O catálogo usado pelo projeto é `youtube_lakehouse`.
 |---|---|---|
 | `control` | `video_targets` | Lista inicial de vídeos, prioridade, ativação e intervalo de atualização. |
 | `control` | `video_processing_state` | Reserva de processamento, tentativas, último sucesso, próximo refresh e erro mais recente por vídeo. |
-| `control` | `ingestion_runs` | Auditoria da execução: início, fim, estado e erro global. |
+| `control` | `ingestion_runs` | Auditoria da execução: início, fim, estado, canal ou canais observados e erro global. |
 | `raw` | `api_responses` | Respostas JSON originais da API, preservadas para auditoria e reprocessamento. |
 | `silver` | `channels`, `videos` | Estado atual do canal e do vídeo, incluindo as contagens públicas mais recentes. |
 | `silver` | `comments`, `replies` | Estado atual dos comentários e respostas conhecidos. Novos registros são inseridos e registros existentes são atualizados. |
@@ -79,6 +79,35 @@ duas coletas.
 Por padrão, os limites de comentários e replies são `0`, que significa
 paginação completa. Um valor positivo limita deliberadamente a coleta e é
 adequado apenas para desenvolvimento ou recuperação controlada.
+
+### Atualização de schema para ambientes existentes
+
+Em um catálogo que já existe, execute uma única vez no Databricks SQL antes do
+próximo Job:
+
+```sql
+ALTER TABLE youtube_lakehouse.control.ingestion_runs
+ADD COLUMN channel_name STRING;
+
+COMMENT ON COLUMN youtube_lakehouse.control.ingestion_runs.channel_name
+IS 'Nome público do canal observado na API; para vários canais, nomes separados por vírgula';
+```
+
+Em uma instalação nova, o notebook `00_setup.ipynb` já cria a coluna. O Job
+preenche `channel_name` com o nome público retornado pela API; em uma execução
+que processar mais de um canal, os nomes são concatenados por vírgula.
+
+## Resiliência da API
+
+Cada chamada à YouTube Data API tem até três tentativas. Falhas de conexão,
+timeout, limitação temporária (`429`/`rateLimitExceeded`) e erros de servidor
+transitórios (`5xx`) aguardam 1 e depois 2 segundos antes de nova tentativa.
+Erros definitivos, como credencial inválida, vídeo inexistente e cota diária
+esgotada, não são repetidos.
+
+As falhas são classificadas no código (por exemplo, `TRANSIENT_NETWORK`,
+`RATE_LIMITED`, `QUOTA_EXCEEDED` e `COMMENTS_DISABLED`) e a categoria é
+preservada na mensagem de erro registrada nas tabelas de controle.
 
 ## Estrutura do projeto
 

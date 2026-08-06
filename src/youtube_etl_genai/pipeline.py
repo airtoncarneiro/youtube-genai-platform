@@ -17,7 +17,11 @@ from youtube_etl_genai.persistence import (
     merge_snapshots,
     schemas,
 )
-from youtube_etl_genai.youtube_client import YouTubeAPIError, YouTubeClient
+from youtube_etl_genai.youtube_client import (
+    YouTubeAPIError,
+    YouTubeAPIErrorCategory,
+    YouTubeClient,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -90,6 +94,7 @@ def run_ingestion(
     raw_responses: list[dict[str, Any]] = []
     claimed_targets: list[tuple[str, int]] = []
     raw_written = False
+    channel_name: str | None = None
 
     def capture_response(
         resource: str, params: dict[str, Any], response: dict[str, Any]
@@ -142,6 +147,10 @@ def run_ingestion(
             client.normalize_channel(channel)
             for channel in client.get_channels(channel_ids)
         ]
+        channel_names = sorted(
+            {channel["title"] for channel in channels if channel.get("title")}
+        )
+        channel_name = ", ".join(channel_names) or None
         comments: list[dict[str, Any]] = []
         replies: list[dict[str, Any]] = []
 
@@ -158,7 +167,7 @@ def run_ingestion(
                     ):
                         replies.append(client.normalize_reply(reply_raw))
             except YouTubeAPIError as exc:
-                if "commentsDisabled" in str(exc):
+                if exc.category is YouTubeAPIErrorCategory.COMMENTS_DISABLED:
                     LOGGER.info("Comentários desabilitados para o vídeo %s", video_id)
                 else:
                     LOGGER.exception(
@@ -228,7 +237,13 @@ def run_ingestion(
         succeeded = sum(status == "SUCCESS" for status, _ in outcomes.values())
         failed = len(claimed_targets) - succeeded
         run_status = "SUCCESS" if failed == 0 else "PARTIAL_SUCCESS"
-        finish_run(spark, catalog, ingestion_id, run_status)
+        finish_run(
+            spark,
+            catalog,
+            ingestion_id,
+            run_status,
+            channel_name=channel_name,
+        )
     except Exception as exc:
         if raw_responses and not raw_written:
             append_raw(spark, catalog, raw_responses, table_schemas["api_responses"])
@@ -242,7 +257,14 @@ def run_ingestion(
                 refresh_interval_hours,
                 str(exc),
             )
-        finish_run(spark, catalog, ingestion_id, "FAILED", str(exc))
+        finish_run(
+            spark,
+            catalog,
+            ingestion_id,
+            "FAILED",
+            str(exc),
+            channel_name=channel_name,
+        )
         raise
 
     result = {

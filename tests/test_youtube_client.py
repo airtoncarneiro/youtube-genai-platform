@@ -5,7 +5,11 @@ from unittest.mock import Mock
 import pytest
 import requests
 
-from youtube_etl_genai.youtube_client import YouTubeAPIError, YouTubeClient
+from youtube_etl_genai.youtube_client import (
+    YouTubeAPIError,
+    YouTubeAPIErrorCategory,
+    YouTubeClient,
+)
 
 
 def test_requires_an_api_key() -> None:
@@ -87,11 +91,14 @@ def test_observes_successful_response_without_api_key() -> None:
 
 
 def test_wraps_timeout_as_youtube_api_error() -> None:
-    client = YouTubeClient(api_key="test-key")
+    client = YouTubeClient(api_key="test-key", sleep=lambda _: None)
     client.session.get = Mock(side_effect=requests.Timeout("timed out"))
 
-    with pytest.raises(YouTubeAPIError, match="Falha ao acessar"):
+    with pytest.raises(YouTubeAPIError, match="TRANSIENT_NETWORK") as raised:
         client.get_channel_by_handle("@example")
+
+    assert raised.value.retryable is True
+    assert raised.value.category is YouTubeAPIErrorCategory.TRANSIENT_NETWORK
 
 
 def test_wraps_http_error_with_response_details() -> None:
@@ -101,8 +108,65 @@ def test_wraps_http_error_with_response_details() -> None:
     response.json.return_value = {"error": {"reason": "commentsDisabled"}}
     client.session.get = Mock(return_value=response)
 
-    with pytest.raises(YouTubeAPIError, match="Erro HTTP 403"):
+    with pytest.raises(YouTubeAPIError, match="COMMENTS_DISABLED") as raised:
         client.get_channel_by_handle("@example")
+
+    assert raised.value.retryable is False
+    assert raised.value.status_code == 403
+    assert raised.value.category is YouTubeAPIErrorCategory.COMMENTS_DISABLED
+
+
+def test_retries_transient_timeout_with_exponential_backoff() -> None:
+    delays: list[float] = []
+    client = YouTubeClient(
+        api_key="test-key",
+        max_attempts=3,
+        backoff_seconds=0.25,
+        sleep=delays.append,
+    )
+    response = Mock()
+    response.json.return_value = {"items": [{"id": "channel-id"}]}
+    client.session.get = Mock(
+        side_effect=[requests.Timeout("first"), requests.Timeout("second"), response]
+    )
+
+    assert client.get_channel_by_handle("@example") == {"id": "channel-id"}
+    assert delays == [0.25, 0.5]
+    assert client.session.get.call_count == 3
+
+
+def test_retries_rate_limit_but_not_quota_exhaustion() -> None:
+    delays: list[float] = []
+    client = YouTubeClient(api_key="test-key", sleep=delays.append)
+    rate_limited = Mock(status_code=429, text="too many requests")
+    rate_limited.raise_for_status.side_effect = requests.HTTPError(
+        response=rate_limited
+    )
+    rate_limited.json.return_value = {
+        "error": {"errors": [{"reason": "rateLimitExceeded"}]}
+    }
+    success = Mock()
+    success.json.return_value = {"items": []}
+    client.session.get = Mock(side_effect=[rate_limited, success])
+
+    assert client.get_channel_by_handle("@example") is None
+    assert delays == [1.0]
+
+    quota_client = YouTubeClient(api_key="test-key", sleep=delays.append)
+    quota_exceeded = Mock(status_code=403, text="quota exhausted")
+    quota_exceeded.raise_for_status.side_effect = requests.HTTPError(
+        response=quota_exceeded
+    )
+    quota_exceeded.json.return_value = {
+        "error": {"errors": [{"reason": "quotaExceeded"}]}
+    }
+    quota_client.session.get = Mock(return_value=quota_exceeded)
+
+    with pytest.raises(YouTubeAPIError, match="QUOTA_EXCEEDED") as raised:
+        quota_client.get_channel_by_handle("@example")
+
+    assert raised.value.retryable is False
+    assert quota_client.session.get.call_count == 1
 
 
 def test_get_videos_sends_at_most_fifty_ids_per_request() -> None:

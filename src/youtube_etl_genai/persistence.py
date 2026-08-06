@@ -118,22 +118,22 @@ def schemas() -> dict[str, StructType]:
     }
 
 
-def append_run_start(
-    spark: Any, catalog: str, ingestion_id: str, channel_handle: str
-) -> None:
+def append_run_start(spark: Any, catalog: str, ingestion_id: str, source: str) -> None:
     """Append a RUNNING control record for a new ingestion."""
     spark.createDataFrame(
         [
             (
                 ingestion_id,
-                channel_handle,
+                source,
+                None,
                 datetime.now(timezone.utc),
                 None,
                 "RUNNING",
                 None,
             )
         ],
-        "ingestion_id string, channel_handle string, started_at timestamp, ended_at timestamp, status string, error_message string",
+        "ingestion_id string, channel_handle string, channel_name string, "
+        "started_at timestamp, ended_at timestamp, status string, error_message string",
     ).write.mode("append").format("delta").saveAsTable(
         f"{catalog}.control.ingestion_runs"
     )
@@ -145,12 +145,13 @@ def finish_run(
     ingestion_id: str,
     status: str,
     error_message: str | None = None,
+    channel_name: str | None = None,
 ) -> None:
-    """Update a control record with its final status and optional error."""
+    """Update a control record with its outcome and observed channel name(s)."""
     view_name = f"staged_run_{uuid4().hex}"
     spark.createDataFrame(
-        [(ingestion_id, status, error_message)],
-        "ingestion_id string, status string, error_message string",
+        [(ingestion_id, status, error_message, channel_name)],
+        "ingestion_id string, status string, error_message string, channel_name string",
     ).createOrReplaceTempView(view_name)
     try:
         spark.sql(
@@ -161,7 +162,8 @@ def finish_run(
         WHEN MATCHED THEN UPDATE SET
           target.ended_at = current_timestamp(),
           target.status = source.status,
-          target.error_message = source.error_message
+          target.error_message = source.error_message,
+          target.channel_name = COALESCE(source.channel_name, target.channel_name)
         """
         )
     finally:

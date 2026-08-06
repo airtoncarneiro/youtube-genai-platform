@@ -1,15 +1,47 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from enum import StrEnum
+import time
 from typing import Any
 
 import requests
 
 
+class YouTubeAPIErrorCategory(StrEnum):
+    """Classify failures so the pipeline can decide whether to retry them."""
+
+    AUTHENTICATION = "AUTHENTICATION"
+    COMMENTS_DISABLED = "COMMENTS_DISABLED"
+    INVALID_REQUEST = "INVALID_REQUEST"
+    NOT_FOUND = "NOT_FOUND"
+    QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
+    RATE_LIMITED = "RATE_LIMITED"
+    TRANSIENT_NETWORK = "TRANSIENT_NETWORK"
+    TRANSIENT_SERVER = "TRANSIENT_SERVER"
+    UNKNOWN = "UNKNOWN"
+
+
 class YouTubeAPIError(RuntimeError):
     """Raised when a YouTube Data API request cannot be completed."""
 
-    pass
+    def __init__(
+        self,
+        category: YouTubeAPIErrorCategory,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retryable: bool = False,
+    ) -> None:
+        self.category = category
+        self.status_code = status_code
+        self.retryable = retryable
+        super().__init__(f"[{category}] {message}")
+
+
+_TRANSIENT_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+_RATE_LIMIT_REASONS = frozenset({"rateLimitExceeded", "userRateLimitExceeded"})
+_QUOTA_REASONS = frozenset({"dailyLimitExceeded", "quotaExceeded"})
 
 
 ResponseObserver = Callable[[str, dict[str, Any], dict[str, Any]], None]
@@ -25,15 +57,76 @@ class YouTubeClient:
         api_key: str,
         timeout: int = 30,
         response_observer: ResponseObserver | None = None,
+        max_attempts: int = 3,
+        backoff_seconds: float = 1.0,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        """Create a client with an API key and optional response observer."""
+        """Create a client with bounded retry/backoff for transient failures."""
         if not api_key:
             raise ValueError("A API Key não foi informada.")
+        if max_attempts < 1:
+            raise ValueError("max_attempts deve ser maior ou igual a um.")
+        if backoff_seconds < 0:
+            raise ValueError("backoff_seconds não pode ser negativo.")
 
         self.api_key = api_key
         self.timeout = timeout
         self.response_observer = response_observer
+        self.max_attempts = max_attempts
+        self.backoff_seconds = backoff_seconds
+        self.sleep = sleep
         self.session = requests.Session()
+
+    @staticmethod
+    def _api_error_from_response(response: requests.Response) -> YouTubeAPIError:
+        """Translate an API error response into a category and retry policy."""
+        try:
+            error_data = response.json()
+        except ValueError:
+            error_data = response.text
+
+        error = error_data.get("error", {}) if isinstance(error_data, dict) else {}
+        errors = error.get("errors", []) if isinstance(error, dict) else []
+        reasons = {
+            item.get("reason")
+            for item in errors
+            if isinstance(item, dict) and item.get("reason")
+        }
+        if isinstance(error, dict) and error.get("reason"):
+            reasons.add(error["reason"])
+        status_code = response.status_code
+
+        if "commentsDisabled" in reasons:
+            category = YouTubeAPIErrorCategory.COMMENTS_DISABLED
+        elif reasons & _RATE_LIMIT_REASONS or status_code == 429:
+            category = YouTubeAPIErrorCategory.RATE_LIMITED
+        elif reasons & _QUOTA_REASONS:
+            category = YouTubeAPIErrorCategory.QUOTA_EXCEEDED
+        elif status_code in {401, 403}:
+            category = YouTubeAPIErrorCategory.AUTHENTICATION
+        elif status_code == 404:
+            category = YouTubeAPIErrorCategory.NOT_FOUND
+        elif status_code == 400:
+            category = YouTubeAPIErrorCategory.INVALID_REQUEST
+        elif status_code in _TRANSIENT_STATUS_CODES:
+            category = YouTubeAPIErrorCategory.TRANSIENT_SERVER
+        else:
+            category = YouTubeAPIErrorCategory.UNKNOWN
+
+        return YouTubeAPIError(
+            category,
+            f"Erro HTTP {status_code}: {error_data}",
+            status_code=status_code,
+            retryable=category
+            in {
+                YouTubeAPIErrorCategory.RATE_LIMITED,
+                YouTubeAPIErrorCategory.TRANSIENT_SERVER,
+            },
+        )
+
+    def _retry_delay(self, attempt: int) -> float:
+        """Return exponential backoff before the next attempt (one-indexed)."""
+        return self.backoff_seconds * (2 ** (attempt - 1))
 
     def _get(
         self,
@@ -48,31 +141,41 @@ class YouTubeClient:
             "key": self.api_key,
         }
 
-        try:
-            response = self.session.get(
-                url,
-                params=request_params,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-        except requests.HTTPError as exc:
+        for attempt in range(1, self.max_attempts + 1):
+            cause: Exception | None = None
             try:
-                error_data = response.json()
-            except ValueError:
-                error_data = response.text
+                response = self.session.get(
+                    url,
+                    params=request_params,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+            except requests.HTTPError as exc:
+                cause = exc
+                error = self._api_error_from_response(exc.response or response)
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                cause = exc
+                error = YouTubeAPIError(
+                    YouTubeAPIErrorCategory.TRANSIENT_NETWORK,
+                    f"Falha transitória ao acessar a API do YouTube: {exc}",
+                    retryable=True,
+                )
+            except requests.RequestException as exc:
+                raise YouTubeAPIError(
+                    YouTubeAPIErrorCategory.UNKNOWN,
+                    f"Falha ao acessar a API do YouTube: {exc}",
+                ) from exc
+            else:
+                response_data = response.json()
+                if self.response_observer:
+                    self.response_observer(resource, params.copy(), response_data)
+                return response_data
 
-            raise YouTubeAPIError(
-                f"Erro HTTP {response.status_code}: {error_data}"
-            ) from exc
-        except requests.RequestException as exc:
-            raise YouTubeAPIError(f"Falha ao acessar a API do YouTube: {exc}") from exc
+            if not error.retryable or attempt == self.max_attempts:
+                raise error from cause
+            self.sleep(self._retry_delay(attempt))
 
-        response_data = response.json()
-
-        if self.response_observer:
-            self.response_observer(resource, params.copy(), response_data)
-
-        return response_data
+        raise AssertionError("Tentativas esgotadas sem retornar ou lançar um erro")
 
     def _paginate(
         self,
