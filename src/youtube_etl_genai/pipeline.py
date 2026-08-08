@@ -20,6 +20,7 @@ from youtube_etl_genai.persistence import (
     merge_snapshots,
     record_step_outcomes,
     replace_ingestion_comments,
+    replace_video_tags,
     schemas,
     step_outcomes,
 )
@@ -70,6 +71,7 @@ def _snapshot_rows(
             entity_key: row[entity_key],
             "ingestion_id": ingestion_id,
             "collected_at": collected_at,
+            "collected_date": collected_at.date(),
             **{metric: row.get(metric) for metric in metrics},
         }
         for row in rows
@@ -131,6 +133,7 @@ def fetch_videos_step(
         raise
     append_raw(spark, catalog, raw, table_schemas["api_responses"])
     merge_silver(spark, catalog, "videos", videos, table_schemas["videos"], "video_id")
+    replace_video_tags(spark, catalog, videos)
     merge_snapshots(
         spark,
         catalog,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 import pytest
@@ -187,3 +188,27 @@ def test_normalizes_comment_with_nullable_parent_id() -> None:
 
     assert normalized["comment_id"] == "comment"
     assert normalized["parent_id"] is None
+
+
+def test_normalizes_video_to_analytical_types_without_channel_title() -> None:
+    normalized = YouTubeClient.normalize_video(
+        {
+            "id": "video-1",
+            "snippet": {
+                "channelId": "channel-1",
+                "channelTitle": "Título que pertence à dimensão de canais",
+                "publishedAt": "2026-08-08T12:30:45Z",
+                "categoryId": "22",
+                "tags": ["dados", "youtube"],
+            },
+            "contentDetails": {"duration": "PT1H2M3.5S"},
+        }
+    )
+
+    assert normalized["published_at"] == datetime(
+        2026, 8, 8, 12, 30, 45, tzinfo=timezone.utc
+    )
+    assert normalized["duration"] == timedelta(hours=1, minutes=2, seconds=3.5)
+    assert normalized["category_id"] == 22
+    assert normalized["tags"] == ["dados", "youtube"]
+    assert "channel_title" not in normalized

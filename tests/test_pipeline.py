@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
-from youtube_etl_genai.persistence import append_raw, merge_silver
+from youtube_etl_genai.persistence import append_raw, merge_silver, schemas
 from youtube_etl_genai.pipeline import _bounded, _snapshot_rows, _validate_limit
 
 
@@ -30,6 +32,18 @@ def test_merge_silver_skips_empty_batches() -> None:
     merge_silver(object(), "catalog", "videos", [], object(), "video_id")
 
 
+def test_schemas_expose_the_optimized_video_and_snapshot_types() -> None:
+    table_schemas = schemas()
+
+    assert table_schemas["videos"].simpleString() == (
+        "struct<video_id:string,channel_id:string,title:string,description:string,"
+        "published_at:timestamp,category_id:int,duration:interval day to second,"
+        "definition:string,caption:string,view_count:bigint,like_count:bigint,"
+        "comment_count:bigint,privacy_status:string>"
+    )
+    assert "collected_date:date" in table_schemas["video_snapshots"].simpleString()
+
+
 def test_zero_limit_keeps_the_complete_paginated_collection() -> None:
     assert list(_bounded(iter([{"id": "one"}, {"id": "two"}]), 0)) == [
         {"id": "one"},
@@ -42,7 +56,7 @@ def test_positive_limit_bounds_the_paginated_collection() -> None:
 
 
 def test_projects_only_video_metrics_into_an_immutable_snapshot() -> None:
-    collected_at = object()
+    collected_at = datetime(2026, 8, 8, 10, 30, tzinfo=timezone.utc)
 
     snapshots = _snapshot_rows(
         "videos",
@@ -64,6 +78,7 @@ def test_projects_only_video_metrics_into_an_immutable_snapshot() -> None:
             "video_id": "video-1",
             "ingestion_id": "run-1",
             "collected_at": collected_at,
+            "collected_date": collected_at.date(),
             "view_count": 10,
             "like_count": 2,
             "comment_count": 1,
@@ -110,6 +125,11 @@ def test_fetch_videos_persists_raw_current_snapshot_and_outcome(
         pipeline, "merge_silver", lambda *args: events.append(("silver", args[3]))
     )
     monkeypatch.setattr(
+        pipeline,
+        "replace_video_tags",
+        lambda *args: events.append(("tags", args[2])),
+    )
+    monkeypatch.setattr(
         pipeline, "merge_snapshots", lambda *args: events.append(("snapshot", args[3]))
     )
     monkeypatch.setattr(
@@ -121,7 +141,13 @@ def test_fetch_videos_persists_raw_current_snapshot_and_outcome(
     assert pipeline.fetch_videos_step(
         spark=object(), api_key="api-key", ingestion_id="run-1"
     ) == {"videos": 1}
-    assert [event[0] for event in events] == ["raw", "silver", "snapshot", "outcomes"]
+    assert [event[0] for event in events] == [
+        "raw",
+        "silver",
+        "tags",
+        "snapshot",
+        "outcomes",
+    ]
     assert events[-1][1] == {
         "video-1": ("SUCCESS", None),
         "missing": ("NOT_FOUND", "Vídeo não encontrado ou não está acessível"),

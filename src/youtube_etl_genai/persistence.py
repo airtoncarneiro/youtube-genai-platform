@@ -15,7 +15,9 @@ def schemas() -> dict[str, StructType]:
     module without requiring a Spark runtime.
     """
     from pyspark.sql.types import (
-        ArrayType,
+        DateType,
+        DayTimeIntervalType,
+        IntegerType,
         LongType,
         StringType,
         StructField,
@@ -57,13 +59,11 @@ def schemas() -> dict[str, StructType]:
         "videos": fields(
             ("video_id", StringType()),
             ("channel_id", StringType()),
-            ("channel_title", StringType()),
             ("title", StringType()),
             ("description", StringType()),
-            ("published_at", StringType()),
-            ("category_id", StringType()),
-            ("tags", ArrayType(StringType())),
-            ("duration", StringType()),
+            ("published_at", TimestampType()),
+            ("category_id", IntegerType()),
+            ("duration", DayTimeIntervalType()),
             ("definition", StringType()),
             ("caption", StringType()),
             ("view_count", LongType()),
@@ -76,6 +76,7 @@ def schemas() -> dict[str, StructType]:
                 StructField("channel_id", StringType(), nullable=False),
                 StructField("ingestion_id", StringType(), nullable=False),
                 StructField("collected_at", TimestampType(), nullable=False),
+                StructField("collected_date", DateType(), nullable=False),
                 StructField("view_count", LongType(), nullable=True),
                 StructField("subscriber_count", LongType(), nullable=True),
                 StructField("video_count", LongType(), nullable=True),
@@ -86,6 +87,7 @@ def schemas() -> dict[str, StructType]:
                 StructField("video_id", StringType(), nullable=False),
                 StructField("ingestion_id", StringType(), nullable=False),
                 StructField("collected_at", TimestampType(), nullable=False),
+                StructField("collected_date", DateType(), nullable=False),
                 StructField("view_count", LongType(), nullable=True),
                 StructField("like_count", LongType(), nullable=True),
                 StructField("comment_count", LongType(), nullable=True),
@@ -251,6 +253,62 @@ def merge_snapshots(
         )
     finally:
         spark.catalog.dropTempView(view_name)
+
+
+def replace_video_tags(
+    spark: Any,
+    catalog: str,
+    videos: list[dict[str, Any]],
+) -> None:
+    """Synchronize the normalized tag bridge for the videos fetched in a run."""
+    video_ids = sorted({row["video_id"] for row in videos if row.get("video_id")})
+    if not video_ids:
+        return
+
+    observed_at = datetime.now(timezone.utc)
+    target_view = f"video_tag_targets_{uuid4().hex}"
+    tag_view = f"video_tags_{uuid4().hex}"
+    target_rows = [(video_id,) for video_id in video_ids]
+    tag_rows = [
+        (row["video_id"], tag, observed_at)
+        for row in videos
+        if row.get("video_id")
+        for tag in row.get("tags") or []
+        if tag
+    ]
+    spark.createDataFrame(target_rows, "video_id string").createOrReplaceTempView(
+        target_view
+    )
+    spark.createDataFrame(
+        tag_rows,
+        "video_id string, tag string, ingested_at timestamp",
+    ).dropDuplicates(["video_id", "tag"]).createOrReplaceTempView(tag_view)
+    try:
+        spark.sql(
+            f"""
+            MERGE INTO {catalog}.silver.video_tags AS target
+            USING {tag_view} AS source
+            ON target.video_id = source.video_id AND target.tag = source.tag
+            WHEN MATCHED THEN UPDATE SET target.ingested_at = source.ingested_at
+            WHEN NOT MATCHED THEN INSERT *
+            """
+        )
+        spark.sql(
+            f"""
+            DELETE FROM {catalog}.silver.video_tags AS target
+            WHERE EXISTS (
+              SELECT 1 FROM {target_view} AS source
+              WHERE source.video_id = target.video_id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM {tag_view} AS source
+              WHERE source.video_id = target.video_id AND source.tag = target.tag
+            )
+            """
+        )
+    finally:
+        spark.catalog.dropTempView(tag_view)
+        spark.catalog.dropTempView(target_view)
 
 
 def claim_video_targets(

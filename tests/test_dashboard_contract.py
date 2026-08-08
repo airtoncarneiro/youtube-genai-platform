@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_PATH = ROOT / "src/dashboards/youtube_operational.lvdash.json"
@@ -16,6 +17,15 @@ def _queries_by_dataset() -> dict[str, str]:
         dataset["name"]: "".join(dataset["queryLines"])
         for dataset in _dashboard()["datasets"]
     }
+
+
+def _setup_sql() -> str:
+    notebook = json.loads(SETUP_NOTEBOOK_PATH.read_text(encoding="utf-8"))
+    return "".join(
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell["id"] in {"setup-control-ddl", "setup-raw-ddl", "setup-silver-ddl"}
+    )
 
 
 def test_every_widget_references_an_existing_dataset() -> None:
@@ -95,3 +105,60 @@ def test_dashboard_resource_matches_the_setup_catalog_and_schema() -> None:
     assert "dataset_schema: silver" in resource
     assert "youtube_lakehouse.silver.dashboard_video_metrics" in setup
     assert "youtube_lakehouse.silver.dashboard_channel_metrics" in setup
+
+
+def test_every_physical_table_column_has_a_comment_in_the_setup_notebook() -> None:
+    setup = _setup_sql()
+    table_definitions = re.finditer(
+        r"CREATE TABLE IF NOT EXISTS ([\w.]+) \((.*?)\) USING DELTA",
+        setup,
+        flags=re.DOTALL,
+    )
+
+    for definition in table_definitions:
+        table_name, columns_sql = definition.groups()
+        for line in columns_sql.splitlines():
+            column = re.match(r"\s{2}([A-Za-z_]\w*)\s+", line)
+            if column and column.group(1) != "CONSTRAINT":
+                assert f"COMMENT ON COLUMN {table_name}.{column.group(1)}" in setup
+
+
+def test_dashboard_ingestion_duration_has_a_comment_in_the_setup_notebook() -> None:
+    setup = _setup_sql()
+
+    assert (
+        "COMMENT ON COLUMN "
+        "youtube_lakehouse.silver.dashboard_ingestion_runs.duration_seconds "
+        "IS 'Duração da execução em segundos, calculada como diferença entre "
+        "ended_at e started_at'"
+    ) in setup
+
+
+def test_key_columns_are_documented_for_genie() -> None:
+    setup = _setup_sql()
+    expected_prefixes = {
+        "channels.channel_id": "PK:",
+        "videos.video_id": "PK:",
+        "videos.channel_id": "FK → channels.channel_id.",
+        "video_tags.video_id": "PK (composta com tag), FK → videos.video_id.",
+        "video_tags.tag": "PK (composta com video_id).",
+        "comments.comment_id": "PK:",
+        "comments.parent_id": "FK → comments.comment_id (recursivo).",
+        "comments.video_id": "FK → videos.video_id.",
+        "replies.comment_id": "PK:",
+        "replies.parent_id": "FK → comments.comment_id.",
+        "replies.video_id": "FK → videos.video_id.",
+        "channel_snapshots.channel_id": (
+            "PK (lógica, composta com ingestion_id), FK → channels.channel_id."
+        ),
+        "channel_snapshots.ingestion_id": "PK lógica (composta com channel_id).",
+        "video_snapshots.video_id": (
+            "PK (lógica, composta com ingestion_id), FK → videos.video_id."
+        ),
+        "video_snapshots.ingestion_id": "PK lógica (composta com video_id).",
+    }
+
+    for column, prefix in expected_prefixes.items():
+        assert (
+            f"COMMENT ON COLUMN youtube_lakehouse.silver.{column} IS '{prefix}"
+        ) in setup

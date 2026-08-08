@@ -56,7 +56,8 @@ fica na variável `catalog` do Bundle e pode ser substituído por target.
 | `control` | `ingestion_step_outcomes` | Resultado de cada fetch por vídeo e execução; permite diagnosticar falhas e finalizar o target somente quando todas as etapas terminarem. |
 | `control` | `ingestion_comments` | Handoff temporário dos comentários retornados na execução, usado exclusivamente pela task de replies. |
 | `raw` | `api_responses` | Respostas JSON originais da API, preservadas para auditoria e reprocessamento. |
-| `silver` | `channels`, `videos` | Estado atual do canal e do vídeo, incluindo as contagens públicas mais recentes. |
+| `silver` | `channels`, `videos` | Estado atual do canal e do vídeo, incluindo as contagens públicas mais recentes. `videos` referencia `channels` por `channel_id`. |
+| `silver` | `video_tags` | Bridge normalizada de tags: uma associação vídeo-tag por linha. |
 | `silver` | `comments`, `replies` | Estado atual dos comentários e respostas conhecidos. Novos registros são inseridos e registros existentes são atualizados. |
 | `silver` | `channel_snapshots`, `video_snapshots` | Histórico imutável de contagens públicas, com uma observação por entidade e execução. |
 | `gold` | — | Reservada para métricas, fatos e modelos analíticos de consumo. |
@@ -74,6 +75,11 @@ duas coletas.
   exibem o último valor conhecido.
 - `video_snapshots` guarda `view_count`, `like_count` e `comment_count`.
 - `channel_snapshots` guarda `view_count`, `subscriber_count` e `video_count`.
+- `video_snapshots` e `channel_snapshots` são particionadas por `collected_date`.
+- `videos.published_at`, `videos.duration` e `videos.category_id` usam,
+  respectivamente, `TIMESTAMP`, `INTERVAL DAY TO SECOND` e `INT`.
+- `channel_title` é obtido de `channels` nas views de apresentação, evitando a
+  duplicação na tabela de vídeos.
 - O par `entidade + ingestion_id` torna o snapshot idempotente em uma mesma
   execução.
 - O valor `refresh_interval_hours` de cada target define quando ele volta a
@@ -123,6 +129,15 @@ CREATE TABLE IF NOT EXISTS youtube_lakehouse.control.ingestion_comments (
 ) USING DELTA;
 ```
 
+### Evolução da modelagem silver
+
+Para um catálogo que já contenha as tabelas silver antigas, pare o Job e execute
+uma única vez [001_silver_modeling.sql](migrations/001_silver_modeling.sql) em
+um SQL Warehouse. A migração cria as tabelas v2, move os dados, normaliza as
+tags e troca os nomes das tabelas; os backups `*_legacy_001` são preservados
+para validação e rollback. Em uma instalação nova, basta executar
+`src/notebooks/00_setup.ipynb`.
+
 ## Resiliência da API
 
 Cada chamada à YouTube Data API tem até três tentativas. Falhas de conexão,
@@ -159,6 +174,8 @@ preservada na mensagem de erro registrada nas tabelas de controle.
 ├── resources/
 │   ├── youtube_operational.dashboard.yml   # recurso do dashboard no Bundle
 │   └── youtube_ingestion.job.yml           # Job serverless do Bundle
+├── migrations/
+│   └── 001_silver_modeling.sql             # evolução reversível da silver existente
 ├── tests/
 ├── databricks.yml
 ├── pyproject.toml

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from datetime import datetime, timedelta
 from enum import StrEnum
+import re
 import time
 from typing import Any
 
@@ -45,6 +47,40 @@ _QUOTA_REASONS = frozenset({"dailyLimitExceeded", "quotaExceeded"})
 
 
 ResponseObserver = Callable[[str, dict[str, Any], dict[str, Any]], None]
+
+_YOUTUBE_DURATION = re.compile(
+    r"^P(?:(?P<days>\d+(?:\.\d+)?)D)?(?:T(?:(?P<hours>\d+(?:\.\d+)?)H)?"
+    r"(?:(?P<minutes>\d+(?:\.\d+)?)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?$"
+)
+
+
+def _parse_rfc3339(value: object) -> datetime | None:
+    """Convert an API RFC 3339 timestamp to a Spark-compatible datetime."""
+    if not isinstance(value, str) or not value:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _parse_youtube_duration(value: object) -> timedelta | None:
+    """Convert the YouTube ISO 8601 day-time duration to ``timedelta``."""
+    if not isinstance(value, str) or not value:
+        return None
+    match = _YOUTUBE_DURATION.fullmatch(value)
+    if not match:
+        raise ValueError(f"Duração ISO 8601 inválida retornada pela API: {value!r}")
+    return timedelta(
+        days=float(match.group("days") or 0),
+        hours=float(match.group("hours") or 0),
+        minutes=float(match.group("minutes") or 0),
+        seconds=float(match.group("seconds") or 0),
+    )
+
+
+def _optional_int(value: object) -> int | None:
+    """Convert optional numeric fields returned as strings by the API."""
+    if value is None or value == "":
+        return None
+    return int(value)
 
 
 class YouTubeClient:
@@ -351,13 +387,12 @@ class YouTubeClient:
         return {
             "video_id": video.get("id"),
             "channel_id": snippet.get("channelId"),
-            "channel_title": snippet.get("channelTitle"),
             "title": snippet.get("title"),
             "description": snippet.get("description"),
-            "published_at": snippet.get("publishedAt"),
-            "category_id": snippet.get("categoryId"),
+            "published_at": _parse_rfc3339(snippet.get("publishedAt")),
+            "category_id": _optional_int(snippet.get("categoryId")),
             "tags": snippet.get("tags", []),
-            "duration": content_details.get("duration"),
+            "duration": _parse_youtube_duration(content_details.get("duration")),
             "definition": content_details.get("definition"),
             "caption": content_details.get("caption"),
             "view_count": int(statistics.get("viewCount", 0)),

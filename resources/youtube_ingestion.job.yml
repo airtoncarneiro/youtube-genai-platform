@@ -19,6 +19,10 @@ resources:
           default: ${var.secret_scope}
         - name: secret_key
           default: ${var.secret_key}
+      schedule:
+        quartz_cron_expression: "0 0 8 * * ?" # todos os dias às 08:00
+        timezone_id: "America/Sao_Paulo"
+        pause_status: UNPAUSED
       tasks:
         - task_key: claim_targets
           description: Cria a execução e reserva os vídeos elegíveis para processamento.
