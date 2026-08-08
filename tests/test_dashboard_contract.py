@@ -83,6 +83,8 @@ def test_latest_video_metrics_only_include_active_targets() -> None:
 
     assert "INNER JOIN dashboard_video_targets" in query
     assert "WHERE targets.is_active" in query
+    assert "SELECT metrics.video_id AS video_id" in query
+    assert "PARTITION BY metrics.video_id" in query
 
 
 def test_dashboard_resource_matches_the_setup_catalog_and_schema() -> None:

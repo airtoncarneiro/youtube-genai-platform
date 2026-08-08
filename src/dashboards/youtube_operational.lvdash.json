@@ -75,8 +75,8 @@
       "displayName": "Métricas atuais por vídeo",
       "queryLines": [
         "WITH ranked_snapshots AS (\n",
-        "  SELECT video_id, video_title, channel_title, collected_at, view_count, like_count, comment_count,\n",
-        "         ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY collected_at DESC) AS row_num\n",
+        "  SELECT metrics.video_id AS video_id, metrics.video_title AS video_title, metrics.channel_title AS channel_title, metrics.collected_at AS collected_at, metrics.view_count AS view_count, metrics.like_count AS like_count, metrics.comment_count AS comment_count,\n",
+        "         ROW_NUMBER() OVER (PARTITION BY metrics.video_id ORDER BY metrics.collected_at DESC) AS row_num\n",
         "  FROM dashboard_video_metrics AS metrics\n",
         "  INNER JOIN dashboard_video_targets AS targets ON metrics.video_id = targets.video_id\n",
         "  WHERE targets.is_active\n",
