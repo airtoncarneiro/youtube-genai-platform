@@ -8,12 +8,52 @@ bundle:
 include:
   - resources/*.yml
 
+variables:
+  catalog:
+    description: Catálogo Unity Catalog que armazena as tabelas da plataforma.
+    default: youtube_lakehouse
+  batch_size:
+    description: Máximo de vídeos reservados por execução.
+    default: 20
+  max_comments_per_video:
+    description: Máximo de comentários por vídeo; zero habilita paginação completa.
+    default: 20
+  max_replies_per_comment:
+    description: Máximo de replies por comentário; zero habilita paginação completa.
+    default: 5
+  secret_scope:
+    description: Secret scope que contém a chave da YouTube Data API.
+    default: youtube_api_key
+  secret_key:
+    description: Nome da chave da YouTube Data API dentro do secret scope.
+    default: api-key
+  job_timeout_seconds:
+    description: Tempo máximo da execução completa do Workflow.
+    default: 7200
+  fetch_timeout_seconds:
+    description: Tempo máximo de cada task de fetch.
+    default: 3600
+  control_timeout_seconds:
+    description: Tempo máximo das tasks de controle e finalização.
+    default: 900
+  fetch_max_retries:
+    description: Tentativas adicionais para falhas transitórias nas tasks de fetch.
+    default: 2
+  retry_interval_millis:
+    description: Intervalo mínimo entre tentativas de uma task.
+    default: 30000
+
 targets:
   dev:
     mode: development
     default: true
     workspace:
       host: https://dbc-6b8e3ad9-e334.cloud.databricks.com
+    variables:
+      catalog: youtube_lakehouse
+      batch_size: 20
+      max_comments_per_video: 20
+      max_replies_per_comment: 5
 
   ## Optionally, there could be 'staging' or 'prod' targets here.
   #
@@ -32,9 +72,7 @@ sync:
     - .ruff_cache/**
     - "**/__pycache__/**"
     - "**/*.pyc"
-    - .env
-    - .env.*
-    - scratch/**
+    - .env*
     - tests/**
     - dist/**
     - "*.code-workspace"

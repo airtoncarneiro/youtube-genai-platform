@@ -24,25 +24,27 @@ diferença está apenas na persistência: registros atuais são atualizados por
 > A YouTube Data API oferece replies apenas para comentários de primeiro nível.
 > Portanto, não há uma terceira camada de “replies de replies” para coletar.
 
-## Arquitetura atual
+## Arquitetura do Workflow
 
 ```text
 control.video_targets
         |
         v
-controle de elegibilidade e processamento
+claim_targets
         |
         v
-YouTube Data API: vídeo -> canal -> comentários -> replies
-        |
-        +--> raw.api_responses          (payloads originais)
-        |
-        +--> silver.*                   (estado atual)
-        |
-        +--> silver.*_snapshots         (histórico de métricas)
+fetch_videos ──┬──> fetch_channels
+               └──> fetch_comments ──> fetch_replies
+                         \                 /
+                          \               /
+                           --> finalize_ingestion
+
+Cada fetch grava seus payloads em raw.api_responses e seus dados em silver.
+control.ingestion_step_outcomes é o handoff durável entre as tasks.
 ```
 
-O catálogo usado pelo projeto é `youtube_lakehouse`.
+No target `dev`, o catálogo usado pelo projeto é `youtube_lakehouse`. O valor
+fica na variável `catalog` do Bundle e pode ser substituído por target.
 
 ## Camadas implementadas
 
@@ -51,6 +53,8 @@ O catálogo usado pelo projeto é `youtube_lakehouse`.
 | `control` | `video_targets` | Lista inicial de vídeos, prioridade, ativação e intervalo de atualização. |
 | `control` | `video_processing_state` | Reserva de processamento, tentativas, último sucesso, próximo refresh e erro mais recente por vídeo. |
 | `control` | `ingestion_runs` | Auditoria da execução: início, fim, estado, canal ou canais observados e erro global. |
+| `control` | `ingestion_step_outcomes` | Resultado de cada fetch por vídeo e execução; permite diagnosticar falhas e finalizar o target somente quando todas as etapas terminarem. |
+| `control` | `ingestion_comments` | Handoff temporário dos comentários retornados na execução, usado exclusivamente pela task de replies. |
 | `raw` | `api_responses` | Respostas JSON originais da API, preservadas para auditoria e reprocessamento. |
 | `silver` | `channels`, `videos` | Estado atual do canal e do vídeo, incluindo as contagens públicas mais recentes. |
 | `silver` | `comments`, `replies` | Estado atual dos comentários e respostas conhecidos. Novos registros são inseridos e registros existentes são atualizados. |
@@ -75,6 +79,9 @@ duas coletas.
 - O valor `refresh_interval_hours` de cada target define quando ele volta a
   ficar elegível após a conclusão; um processamento abandonado em estado
   `PROCESSING` pode ser retomado após duas horas.
+- `ingestion_comments` é removida pela task `finalize_ingestion`, depois que o
+  fetch de replies termina ou é definitivamente interrompido. Ela não é uma
+  tabela histórica.
 
 Por padrão, os limites de comentários e replies são `0`, que significa
 paginação completa. Um valor positivo limita deliberadamente a coleta e é
@@ -97,6 +104,25 @@ Em uma instalação nova, o notebook `00_setup.ipynb` já cria a coluna. O Job
 preenche `channel_name` com o nome público retornado pela API; em uma execução
 que processar mais de um canal, os nomes são concatenados por vírgula.
 
+Para migrar um catálogo existente para o Workflow separado, execute também:
+
+```sql
+CREATE TABLE IF NOT EXISTS youtube_lakehouse.control.ingestion_step_outcomes (
+  ingestion_id STRING NOT NULL,
+  video_id STRING NOT NULL,
+  step STRING NOT NULL,
+  status STRING NOT NULL,
+  completed_at TIMESTAMP NOT NULL,
+  error_message STRING
+) USING DELTA;
+
+CREATE TABLE IF NOT EXISTS youtube_lakehouse.control.ingestion_comments (
+  ingestion_id STRING NOT NULL,
+  video_id STRING NOT NULL,
+  comment_id STRING NOT NULL
+) USING DELTA;
+```
+
 ## Resiliência da API
 
 Cada chamada à YouTube Data API tem até três tentativas. Falhas de conexão,
@@ -116,10 +142,16 @@ preservada na mensagem de erro registrada nas tabelas de controle.
 ├── src/
 │   ├── notebooks/
 │   │   ├── 00_setup.ipynb                  # cria catálogo, schemas e tabelas
-│   │   └── 01_youtube_ingestion_test.ipynb # exploração do cliente da API
+│   │   ├── 01_youtube_ingestion_test.ipynb # consulta as tabelas do lakehouse
+│   │   ├── 10_claim_targets.ipynb          # task de reserva dos targets
+│   │   ├── 20_fetch_videos.ipynb           # task de vídeos
+│   │   ├── 30_fetch_channels.ipynb         # task de canais
+│   │   ├── 40_fetch_comments.ipynb         # task de comentários
+│   │   ├── 50_fetch_replies.ipynb          # task de replies
+│   │   └── 60_finalize_ingestion.ipynb     # task de consolidação
 │   └── youtube_etl_genai/
 │       ├── main.py                         # entry point da wheel e leitura do segredo
-│       ├── pipeline.py                     # seleção, coleta e orquestração
+│       ├── pipeline.py                     # funções Python de cada etapa do Workflow
 │       ├── persistence.py                  # schemas, Delta MERGE e estado de controle
 │       └── youtube_client.py               # cliente reutilizável da YouTube Data API
 ├── resources/
@@ -131,9 +163,9 @@ preservada na mensagem de erro registrada nas tabelas de controle.
 ```
 
 O código de produção fica exclusivamente em `src/youtube_etl_genai` e é
-empacotado na wheel. Os notebooks são sincronizados pelo Bundle, mas não fazem
-parte do pacote Python. O notebook `01_youtube_ingestion_test.ipynb` serve para
-exploração; a ingestão operacional deve ser feita pelo Job `youtube_ingestion`.
+empacotado na wheel. Os notebooks são adaptadores finos: leem os parâmetros da
+task, obtêm a sessão/segredo e chamam as funções Python. Eles são sincronizados
+pelo Bundle, mas não fazem parte do pacote Python.
 
 ## Pré-requisitos
 
@@ -202,28 +234,46 @@ versionada ou comando de terminal.
 
 ## Databricks Asset Bundle e execução
 
-O Bundle cria o Job `youtube_ingestion` com uma única task, `fetch_youtube`.
-Ela usa compute serverless, environment version 5 (Python 3.12), instala a
-wheel produzida pelo Poetry e executa o entry point `run`.
+O Bundle cria o Job `youtube_ingestion` com seis tasks serverless:
+`claim_targets`, `fetch_videos`, `fetch_channels`, `fetch_comments`,
+`fetch_replies` e `finalize_ingestion`. Após vídeos, canais e comentários
+podem rodar em paralelo; replies depende de comentários. A finalização usa
+`ALL_DONE` para registrar corretamente falhas de qualquer ramo.
+
+O Job aceita uma execução por vez e mantém execuções adicionais em fila. As
+tasks de fetch têm duas novas tentativas, com intervalo mínimo de 30 segundos;
+as tasks de controle têm uma. Há timeout de duas horas para o Job, uma hora
+para fetches e quinze minutos para controle/finalização. As operações Delta
+são idempotentes para o mesmo `ingestion_id`; respostas raw podem se repetir
+quando uma task é novamente tentada, preservando o histórico técnico da API.
+
+Todas as tasks usam o environment version 5 (Python 3.12) e a wheel produzida
+pelo Poetry. Cada notebook chama o módulo Python correspondente, sem duplicar
+lógica de API ou persistência.
 
 Em serverless, a wheel lê a chave com `DBUtils.secrets.get` usando os parâmetros
 `secret_scope` e `secret_key`. Em um cluster clássico, o entry point também
 aceita a variável de ambiente `YOUTUBE_API_KEY` como alternativa de execução.
 
-Parâmetros atuais da task:
+Parâmetros do Workflow:
 
 | Parâmetro | Padrão | Significado |
 |---|---:|---|
-| `batch_size` | `20` | Máximo de vídeos elegíveis reservados na execução. |
-| `max_comments_per_video` | `20` | Máximo de comentários por vídeo; `0` pagina todos. |
-| `max_replies_per_comment` | `5` | Máximo de replies por comentário; `0` pagina todas. |
+| `batch_size` | `20` | Máximo de vídeos elegíveis reservados por `claim_targets`. |
+| `max_comments_per_video` | `20` | Máximo de comentários por vídeo em `fetch_comments`; `0` pagina todos. |
+| `max_replies_per_comment` | `5` | Máximo de replies por comentário em `fetch_replies`; `0` pagina todas. |
 | `secret_scope` | `youtube_api_key` | Scope que contém a chave da YouTube API. |
 | `secret_key` | `api-key` | Nome da chave dentro do scope. |
+
+Os valores são definidos em `databricks.yml` como variáveis e o target `dev`
+os fornece ao Job. Para criar outro target, defina os valores adequados de
+`catalog`, limites e segredo em `targets.<nome>.variables`; os notebooks não
+precisam ser alterados.
 
 Comandos principais:
 
 ```bash
-databricks bundle validate -t dev
+databricks bundle validate --strict -t dev
 databricks bundle deploy -t dev
 databricks bundle run -t dev youtube_ingestion
 ```
@@ -292,6 +342,7 @@ Valide os notebooks separadamente, pois são arquivos JSON:
 ```bash
 python -m json.tool src/notebooks/00_setup.ipynb >/dev/null
 python -m json.tool src/notebooks/01_youtube_ingestion_test.ipynb >/dev/null
+python -m json.tool src/notebooks/10_claim_targets.ipynb >/dev/null
 ```
 
 ## Próximas evoluções

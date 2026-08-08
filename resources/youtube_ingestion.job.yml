@@ -2,23 +2,127 @@ resources:
   jobs:
     youtube_ingestion:
       name: "${bundle.target}-youtube-ingestion"
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+      timeout_seconds: ${var.job_timeout_seconds}
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: batch_size
+          default: ${var.batch_size}
+        - name: max_comments_per_video
+          default: ${var.max_comments_per_video}
+        - name: max_replies_per_comment
+          default: ${var.max_replies_per_comment}
+        - name: secret_scope
+          default: ${var.secret_scope}
+        - name: secret_key
+          default: ${var.secret_key}
       tasks:
-        - task_key: fetch_youtube
+        - task_key: claim_targets
+          description: Cria a execução e reserva os vídeos elegíveis para processamento.
           environment_key: default
-          python_wheel_task:
-            package_name: youtube_etl_genai
-            entry_point: run
-            named_parameters:
-              batch_size: "20"
-              # Zero means complete pagination. Use a positive value only for
-              # a deliberately bounded development or recovery run.
-              max_comments_per_video: "20"
-              max_replies_per_comment: "5"
-              secret_scope: "youtube_api_key"
-              secret_key: "api-key"
+          timeout_seconds: ${var.control_timeout_seconds}
+          max_retries: 1
+          min_retry_interval_millis: ${var.retry_interval_millis}
+          retry_on_timeout: true
+          notebook_task:
+            notebook_path: ../src/notebooks/10_claim_targets.ipynb
+            base_parameters:
+              batch_size: "{{job.parameters.batch_size}}"
+              catalog: "{{job.parameters.catalog}}"
+
+        - task_key: fetch_videos
+          description: Atualiza os dados atuais e os snapshots de métricas dos vídeos reservados.
+          depends_on:
+            - task_key: claim_targets
+          environment_key: default
+          timeout_seconds: ${var.fetch_timeout_seconds}
+          max_retries: ${var.fetch_max_retries}
+          min_retry_interval_millis: ${var.retry_interval_millis}
+          retry_on_timeout: true
+          notebook_task:
+            notebook_path: ../src/notebooks/20_fetch_videos.ipynb
+            base_parameters:
+              ingestion_id: "{{tasks.claim_targets.values.ingestion_id}}"
+              catalog: "{{job.parameters.catalog}}"
+              secret_scope: "{{job.parameters.secret_scope}}"
+              secret_key: "{{job.parameters.secret_key}}"
+
+        - task_key: fetch_channels
+          description: Atualiza os dados atuais e os snapshots dos canais dos vídeos encontrados.
+          depends_on:
+            - task_key: fetch_videos
+          environment_key: default
+          timeout_seconds: ${var.fetch_timeout_seconds}
+          max_retries: ${var.fetch_max_retries}
+          min_retry_interval_millis: ${var.retry_interval_millis}
+          retry_on_timeout: true
+          notebook_task:
+            notebook_path: ../src/notebooks/30_fetch_channels.ipynb
+            base_parameters:
+              ingestion_id: "{{tasks.claim_targets.values.ingestion_id}}"
+              catalog: "{{job.parameters.catalog}}"
+              secret_scope: "{{job.parameters.secret_scope}}"
+              secret_key: "{{job.parameters.secret_key}}"
+
+        - task_key: fetch_comments
+          description: Atualiza os comentários públicos de primeiro nível de cada vídeo encontrado.
+          depends_on:
+            - task_key: fetch_videos
+          environment_key: default
+          timeout_seconds: ${var.fetch_timeout_seconds}
+          max_retries: ${var.fetch_max_retries}
+          min_retry_interval_millis: ${var.retry_interval_millis}
+          retry_on_timeout: true
+          notebook_task:
+            notebook_path: ../src/notebooks/40_fetch_comments.ipynb
+            base_parameters:
+              ingestion_id: "{{tasks.claim_targets.values.ingestion_id}}"
+              max_comments_per_video: "{{job.parameters.max_comments_per_video}}"
+              catalog: "{{job.parameters.catalog}}"
+              secret_scope: "{{job.parameters.secret_scope}}"
+              secret_key: "{{job.parameters.secret_key}}"
+
+        - task_key: fetch_replies
+          description: Atualiza as respostas dos comentários retornados na etapa anterior.
+          depends_on:
+            - task_key: fetch_comments
+          environment_key: default
+          timeout_seconds: ${var.fetch_timeout_seconds}
+          max_retries: ${var.fetch_max_retries}
+          min_retry_interval_millis: ${var.retry_interval_millis}
+          retry_on_timeout: true
+          notebook_task:
+            notebook_path: ../src/notebooks/50_fetch_replies.ipynb
+            base_parameters:
+              ingestion_id: "{{tasks.claim_targets.values.ingestion_id}}"
+              max_replies_per_comment: "{{job.parameters.max_replies_per_comment}}"
+              catalog: "{{job.parameters.catalog}}"
+              secret_scope: "{{job.parameters.secret_scope}}"
+              secret_key: "{{job.parameters.secret_key}}"
+
+        - task_key: finalize_ingestion
+          description: Consolida as etapas e atualiza o status final de cada vídeo e da execução.
+          depends_on:
+            - task_key: fetch_channels
+            - task_key: fetch_replies
+          run_if: ALL_DONE
+          environment_key: default
+          timeout_seconds: ${var.control_timeout_seconds}
+          max_retries: 1
+          min_retry_interval_millis: ${var.retry_interval_millis}
+          retry_on_timeout: true
+          notebook_task:
+            notebook_path: ../src/notebooks/60_finalize_ingestion.ipynb
+            base_parameters:
+              ingestion_id: "{{tasks.claim_targets.values.ingestion_id}}"
+              catalog: "{{job.parameters.catalog}}"
+
       environments:
         - environment_key: default
           spec:
-              environment_version: "5"
-              dependencies:
-                - ../dist/*.whl
+            environment_version: "5"
+            dependencies:
+              - ../dist/*.whl

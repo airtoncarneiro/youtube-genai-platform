@@ -71,10 +71,9 @@ def test_projects_only_video_metrics_into_an_immutable_snapshot() -> None:
     ]
 
 
-def test_run_ingestion_orchestrates_a_complete_video_refresh(
+def test_fetch_videos_persists_raw_current_snapshot_and_outcome(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A due target must reach raw, silver, snapshots and control completion."""
     from youtube_etl_genai import pipeline
 
     events: list[tuple[str, object]] = []
@@ -85,160 +84,137 @@ def test_run_ingestion_orchestrates_a_complete_video_refresh(
             self.response_observer = response_observer
 
         def get_videos(self, video_ids: list[str]) -> list[dict[str, object]]:
-            assert video_ids == ["video-1"]
-            self.response_observer("videos", {"id": "video-1"}, {"items": ["raw"]})
-            return [{"video_id": "video-1", "channel_id": "channel-1"}]
+            assert video_ids == ["video-1", "missing"]
+            self.response_observer("videos", {"id": "video-1"}, {"items": []})
+            return [{"video_id": "video-1", "view_count": 10}]
 
         @staticmethod
         def normalize_video(video: dict[str, object]) -> dict[str, object]:
             return video
 
-        def get_channels(self, channel_ids: list[str]) -> list[dict[str, object]]:
-            assert channel_ids == ["channel-1"]
-            return [
-                {
-                    "channel_id": "channel-1",
-                    "title": "Canal de teste",
-                    "view_count": 4,
-                }
-            ]
-
-        @staticmethod
-        def normalize_channel(channel: dict[str, object]) -> dict[str, object]:
-            return channel
-
-        @staticmethod
-        def iter_comment_threads(video_id: str) -> object:
-            assert video_id == "video-1"
-            return iter([{"comment_id": "comment-1"}])
-
-        @staticmethod
-        def normalize_top_level_comment(
-            thread: dict[str, object],
-        ) -> dict[str, object]:
-            return {
-                "comment_id": thread["comment_id"],
-                "video_id": "video-1",
-                "like_count": 2,
-                "reply_count": 1,
-            }
-
-        @staticmethod
-        def iter_replies(comment_id: str) -> object:
-            assert comment_id == "comment-1"
-            return iter([{"comment_id": "reply-1"}])
-
-        @staticmethod
-        def normalize_reply(reply: dict[str, object]) -> dict[str, object]:
-            return {
-                "comment_id": reply["comment_id"],
-                "parent_id": "comment-1",
-                "video_id": "video-1",
-                "like_count": 1,
-            }
-
+    monkeypatch.setattr(
+        pipeline, "ingestion_targets", lambda *_: [("video-1", 24), ("missing", 24)]
+    )
     monkeypatch.setattr(
         pipeline,
         "schemas",
         lambda: {
-            name: object()
-            for name in (
-                "api_responses",
-                "channels",
-                "videos",
-                "comments",
-                "replies",
-                "channel_snapshots",
-                "video_snapshots",
-            )
+            name: object() for name in ("api_responses", "videos", "video_snapshots")
         },
     )
     monkeypatch.setattr(pipeline, "YouTubeClient", FakeClient)
     monkeypatch.setattr(
-        pipeline,
-        "append_run_start",
-        lambda *_: events.append(("run_start", None)),
+        pipeline, "append_raw", lambda *args: events.append(("raw", args[2]))
+    )
+    monkeypatch.setattr(
+        pipeline, "merge_silver", lambda *args: events.append(("silver", args[3]))
+    )
+    monkeypatch.setattr(
+        pipeline, "merge_snapshots", lambda *args: events.append(("snapshot", args[3]))
     )
     monkeypatch.setattr(
         pipeline,
-        "claim_video_targets",
-        lambda *_: [("video-1", 24)],
+        "record_step_outcomes",
+        lambda *args: events.append(("outcomes", args[4])),
     )
+
+    assert pipeline.fetch_videos_step(
+        spark=object(), api_key="api-key", ingestion_id="run-1"
+    ) == {"videos": 1}
+    assert [event[0] for event in events] == ["raw", "silver", "snapshot", "outcomes"]
+    assert events[-1][1] == {
+        "video-1": ("SUCCESS", None),
+        "missing": ("NOT_FOUND", "Vídeo não encontrado ou não está acessível"),
+    }
+
+
+def test_finalize_marks_target_failed_when_a_step_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from youtube_etl_genai import pipeline
+
+    completed: list[tuple[str, str, str | None]] = []
+    monkeypatch.setattr(pipeline, "ingestion_targets", lambda *_: [("video-1", 24)])
     monkeypatch.setattr(
         pipeline,
-        "append_raw",
-        lambda _, __, rows, ___: events.append(("raw", rows)),
-    )
-    monkeypatch.setattr(
-        pipeline,
-        "merge_silver",
-        lambda _, __, table, rows, ___, ____: events.append((f"silver:{table}", rows)),
-    )
-    monkeypatch.setattr(
-        pipeline,
-        "merge_snapshots",
-        lambda _, __, table, rows, ___, ____: events.append(
-            (f"snapshot:{table}", rows)
-        ),
+        "step_outcomes",
+        lambda *_: {"video-1": {"fetch_videos": ("SUCCESS", None)}},
     )
     monkeypatch.setattr(
         pipeline,
         "finish_video_target",
-        lambda _, __, video_id, ___, status, ____, error: events.append(
-            (f"target:{video_id}", (status, error))
+        lambda _, __, video_id, ___, status, ____, error: completed.append(
+            (video_id, status, error)
         ),
     )
+    cleanup_calls: list[str] = []
+    monkeypatch.setattr(
+        pipeline,
+        "clear_ingestion_comments",
+        lambda _, __, ingestion_id: cleanup_calls.append(ingestion_id),
+    )
+    run_status: list[str] = []
+    monkeypatch.setattr(pipeline, "_channel_name", lambda *_: "Canal de teste")
     monkeypatch.setattr(
         pipeline,
         "finish_run",
-        lambda _, __, ___, status, error_message=None, channel_name=None: events.append(
-            ("run_finish", (status, error_message, channel_name))
+        lambda spark, catalog, ingestion_id, status, **kwargs: run_status.append(
+            status
         ),
     )
 
-    result = pipeline.run_ingestion(spark=object(), api_key="api-key")
+    result = pipeline.finalize_ingestion_step(spark=object(), ingestion_id="run-1")
 
-    assert result["targets"] == 1
-    assert result["videos"] == result["channels"] == result["comments"] == 1
-    assert result["replies"] == 1
-    assert [event[0] for event in events] == [
-        "run_start",
-        "raw",
-        "silver:channels",
-        "silver:videos",
-        "silver:comments",
-        "silver:replies",
-        "snapshot:channel_snapshots",
-        "snapshot:video_snapshots",
-        "target:video-1",
-        "run_finish",
-    ]
-    assert events[-2] == ("target:video-1", ("SUCCESS", None))
-    assert events[-1] == ("run_finish", ("SUCCESS", None, "Canal de teste"))
+    assert result["status"] == "PARTIAL_SUCCESS"
+    assert completed[0][0:2] == ("video-1", "FAILED")
+    assert "fetch_channels" in (completed[0][2] or "")
+    assert run_status == ["PARTIAL_SUCCESS"]
+    assert cleanup_calls == ["run-1"]
 
 
-def test_run_ingestion_finishes_when_no_target_is_due(
+def test_run_ingestion_calls_every_step_in_workflow_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An empty schedule is a successful execution and must not call the API."""
     from youtube_etl_genai import pipeline
 
-    completed: list[str] = []
-    monkeypatch.setattr(pipeline, "schemas", lambda: {})
-    monkeypatch.setattr(pipeline, "append_run_start", lambda *_: None)
-    monkeypatch.setattr(pipeline, "claim_video_targets", lambda *_: [])
+    calls: list[str] = []
     monkeypatch.setattr(
         pipeline,
-        "finish_run",
-        lambda _, __, ___, status, *args: completed.append(status),
+        "claim_targets_step",
+        lambda **_: calls.append("claim") or {"ingestion_id": "run-1", "targets": 1},
     )
+    for name, key in (
+        ("fetch_videos_step", "videos"),
+        ("fetch_channels_step", "channels"),
+        ("fetch_comments_step", "comments"),
+        ("fetch_replies_step", "replies"),
+    ):
+        monkeypatch.setattr(
+            pipeline,
+            name,
+            lambda _name=name, _key=key, **_: calls.append(_name) or {_key: 1},
+        )
     monkeypatch.setattr(
         pipeline,
-        "YouTubeClient",
-        lambda *_args, **_kwargs: pytest.fail("A API não deveria ser chamada"),
+        "finalize_ingestion_step",
+        lambda **_: calls.append("finalize")
+        or {"ingestion_id": "run-1", "targets": 1, "status": "SUCCESS"},
     )
 
     result = pipeline.run_ingestion(spark=object(), api_key="api-key")
 
-    assert result["targets"] == 0
-    assert completed == ["SUCCESS"]
+    assert calls == [
+        "claim",
+        "fetch_videos_step",
+        "fetch_channels_step",
+        "fetch_comments_step",
+        "fetch_replies_step",
+        "finalize",
+    ]
+    assert (
+        result["videos"]
+        == result["channels"]
+        == result["comments"]
+        == result["replies"]
+        == 1
+    )

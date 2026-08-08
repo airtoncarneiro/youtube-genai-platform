@@ -11,11 +11,17 @@ from youtube_etl_genai.persistence import (
     append_raw,
     append_run_start,
     claim_video_targets,
+    clear_ingestion_comments,
     finish_run,
     finish_video_target,
+    ingestion_comment_ids,
+    ingestion_targets,
     merge_silver,
     merge_snapshots,
+    record_step_outcomes,
+    replace_ingestion_comments,
     schemas,
+    step_outcomes,
 )
 from youtube_etl_genai.youtube_client import (
     YouTubeAPIError,
@@ -24,6 +30,8 @@ from youtube_etl_genai.youtube_client import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+FETCH_STEPS = ("fetch_videos", "fetch_channels", "fetch_comments", "fetch_replies")
 
 
 def _validate_limit(value: str, name: str, allow_zero: bool = True) -> int:
@@ -49,7 +57,7 @@ def _snapshot_rows(
     ingestion_id: str,
     collected_at: datetime,
 ) -> list[dict[str, Any]]:
-    """Project current entity records into their immutable metric snapshots."""
+    """Project current entity records into immutable metric snapshots."""
     if entity == "channels":
         metrics = ("view_count", "subscriber_count", "video_count")
         entity_key = "channel_id"
@@ -69,38 +77,14 @@ def _snapshot_rows(
     ]
 
 
-def run_ingestion(
-    *,
-    spark: Any,
-    api_key: str,
-    batch_size: str = "20",
-    max_comments_per_video: str = "0",
-    max_replies_per_comment: str = "0",
-    catalog: str = "youtube_lakehouse",
-) -> dict[str, int | str]:
-    """Refresh a due batch from ``control.video_targets``.
+def _response_collector(ingestion_id: str) -> tuple[list[dict[str, Any]], Any]:
+    """Create an observer that records successful API calls without secrets."""
+    responses: list[dict[str, Any]] = []
 
-    The target list, rather than a channel uploads playlist, is the source of
-    truth. Every due target is fetched again: current tables receive the newest
-    state while video and channel metric snapshots are immutable per run.
-    A limit of zero means complete pagination for comments or replies.
-    """
-    requested_batch_size = _validate_limit(batch_size, "batch_size", allow_zero=False)
-    comment_limit = _validate_limit(max_comments_per_video, "max_comments_per_video")
-    reply_limit = _validate_limit(max_replies_per_comment, "max_replies_per_comment")
-    table_schemas = schemas()
-    ingestion_id = str(uuid4())
-    collected_at = datetime.now(timezone.utc)
-    raw_responses: list[dict[str, Any]] = []
-    claimed_targets: list[tuple[str, int]] = []
-    raw_written = False
-    channel_name: str | None = None
-
-    def capture_response(
+    def capture(
         resource: str, params: dict[str, Any], response: dict[str, Any]
     ) -> None:
-        """Record a successful response without retaining the API key."""
-        raw_responses.append(
+        responses.append(
             {
                 "ingestion_id": ingestion_id,
                 "resource": resource,
@@ -110,170 +94,357 @@ def run_ingestion(
             }
         )
 
+    return responses, capture
+
+
+def claim_targets_step(
+    *, spark: Any, batch_size: str = "20", catalog: str = "youtube_lakehouse"
+) -> dict[str, int | str]:
+    """Create an ingestion run and reserve its due video targets."""
+    ingestion_id = str(uuid4())
+    requested_batch_size = _validate_limit(batch_size, "batch_size", allow_zero=False)
     append_run_start(spark, catalog, ingestion_id, "control.video_targets")
+    targets = claim_video_targets(spark, catalog, ingestion_id, requested_batch_size)
+    if not targets:
+        finish_run(spark, catalog, ingestion_id, "SUCCESS")
+    result = {"ingestion_id": ingestion_id, "targets": len(targets)}
+    LOGGER.info("Targets reservados: %s", result)
+    return result
+
+
+def fetch_videos_step(
+    *, spark: Any, api_key: str, ingestion_id: str, catalog: str = "youtube_lakehouse"
+) -> dict[str, int]:
+    """Fetch videos owned by an ingestion and persist current data and snapshots."""
+    targets = ingestion_targets(spark, catalog, ingestion_id)
+    if not targets:
+        return {"videos": 0}
+
+    raw, observe = _response_collector(ingestion_id)
+    table_schemas = schemas()
+    client = YouTubeClient(api_key=api_key, response_observer=observe)
+    target_ids = [video_id for video_id, _ in targets]
     try:
-        claimed_targets = claim_video_targets(
-            spark, catalog, ingestion_id, requested_batch_size
-        )
-        if not claimed_targets:
-            finish_run(spark, catalog, ingestion_id, "SUCCESS")
-            return {
-                "ingestion_id": ingestion_id,
-                "targets": 0,
-                "videos": 0,
-                "channels": 0,
-                "comments": 0,
-                "replies": 0,
-            }
-
-        client = YouTubeClient(api_key=api_key, response_observer=capture_response)
-        target_ids = [video_id for video_id, _ in claimed_targets]
-        videos = [
-            client.normalize_video(video) for video in client.get_videos(target_ids)
-        ]
-        found_video_ids = {
-            video["video_id"] for video in videos if video.get("video_id")
-        }
-        outcomes: dict[str, tuple[str, str | None]] = {
-            video_id: ("NOT_FOUND", "Vídeo não encontrado ou não está acessível")
+        videos = [client.normalize_video(row) for row in client.get_videos(target_ids)]
+    except Exception:
+        append_raw(spark, catalog, raw, table_schemas["api_responses"])
+        raise
+    append_raw(spark, catalog, raw, table_schemas["api_responses"])
+    merge_silver(spark, catalog, "videos", videos, table_schemas["videos"], "video_id")
+    merge_snapshots(
+        spark,
+        catalog,
+        "video_snapshots",
+        _snapshot_rows("videos", videos, ingestion_id, datetime.now(timezone.utc)),
+        table_schemas["video_snapshots"],
+        "video_id",
+    )
+    found = {row["video_id"] for row in videos if row.get("video_id")}
+    record_step_outcomes(
+        spark,
+        catalog,
+        ingestion_id,
+        "fetch_videos",
+        {
+            video_id: (
+                ("SUCCESS", None)
+                if video_id in found
+                else ("NOT_FOUND", "Vídeo não encontrado ou não está acessível")
+            )
             for video_id in target_ids
-            if video_id not in found_video_ids
-        }
+        },
+    )
+    return {"videos": len(videos)}
 
-        channel_ids = sorted(
-            {video["channel_id"] for video in videos if video.get("channel_id")}
-        )
+
+def _successful_video_ids(spark: Any, catalog: str, ingestion_id: str) -> list[str]:
+    outcomes = step_outcomes(spark, catalog, ingestion_id)
+    return [
+        video_id
+        for video_id, _ in ingestion_targets(spark, catalog, ingestion_id)
+        if outcomes.get(video_id, {}).get("fetch_videos", (None, None))[0] == "SUCCESS"
+    ]
+
+
+def _video_channels(
+    spark: Any, catalog: str, ingestion_id: str, video_ids: list[str]
+) -> dict[str, str | None]:
+    if not video_ids:
+        return {}
+    values = ", ".join(f"'{video_id}'" for video_id in video_ids)
+    rows = spark.sql(
+        f"""
+        SELECT video_id, channel_id
+        FROM {catalog}.silver.videos
+        WHERE video_id IN ({values})
+        """
+    ).collect()
+    return {row.video_id: row.channel_id for row in rows}
+
+
+def fetch_channels_step(
+    *, spark: Any, api_key: str, ingestion_id: str, catalog: str = "youtube_lakehouse"
+) -> dict[str, int]:
+    """Fetch channels referenced by the successfully fetched videos."""
+    video_ids = _successful_video_ids(spark, catalog, ingestion_id)
+    if not video_ids:
+        return {"channels": 0}
+    video_channels = _video_channels(spark, catalog, ingestion_id, video_ids)
+    channel_ids = sorted(
+        {channel_id for channel_id in video_channels.values() if channel_id}
+    )
+    raw, observe = _response_collector(ingestion_id)
+    table_schemas = schemas()
+    client = YouTubeClient(api_key=api_key, response_observer=observe)
+    try:
         channels = [
-            client.normalize_channel(channel)
-            for channel in client.get_channels(channel_ids)
+            client.normalize_channel(row) for row in client.get_channels(channel_ids)
         ]
-        channel_names = sorted(
-            {channel["title"] for channel in channels if channel.get("title")}
-        )
-        channel_name = ", ".join(channel_names) or None
-        comments: list[dict[str, Any]] = []
-        replies: list[dict[str, Any]] = []
+    except Exception:
+        append_raw(spark, catalog, raw, table_schemas["api_responses"])
+        raise
+    append_raw(spark, catalog, raw, table_schemas["api_responses"])
+    merge_silver(
+        spark, catalog, "channels", channels, table_schemas["channels"], "channel_id"
+    )
+    merge_snapshots(
+        spark,
+        catalog,
+        "channel_snapshots",
+        _snapshot_rows("channels", channels, ingestion_id, datetime.now(timezone.utc)),
+        table_schemas["channel_snapshots"],
+        "channel_id",
+    )
+    found_channels = {row["channel_id"] for row in channels if row.get("channel_id")}
+    record_step_outcomes(
+        spark,
+        catalog,
+        ingestion_id,
+        "fetch_channels",
+        {
+            video_id: (
+                ("SUCCESS", None)
+                if channel_id in found_channels
+                else ("FAILED", "Canal do vídeo não foi retornado pela API")
+            )
+            for video_id, channel_id in video_channels.items()
+        },
+    )
+    return {"channels": len(channels)}
 
-        for video in videos:
-            video_id = video["video_id"]
-            try:
+
+def fetch_comments_step(
+    *,
+    spark: Any,
+    api_key: str,
+    ingestion_id: str,
+    max_comments_per_video: str = "0",
+    catalog: str = "youtube_lakehouse",
+) -> dict[str, int]:
+    """Fetch top-level comments independently for every fetched video."""
+    comment_limit = _validate_limit(max_comments_per_video, "max_comments_per_video")
+    video_ids = _successful_video_ids(spark, catalog, ingestion_id)
+    if not video_ids:
+        return {"comments": 0}
+    raw, observe = _response_collector(ingestion_id)
+    table_schemas = schemas()
+    client = YouTubeClient(api_key=api_key, response_observer=observe)
+    comments: list[dict[str, Any]] = []
+    outcomes: dict[str, tuple[str, str | None]] = {}
+    for video_id in video_ids:
+        try:
+            comments.extend(
+                client.normalize_top_level_comment(thread)
                 for thread in _bounded(
                     client.iter_comment_threads(video_id), comment_limit
-                ):
-                    comment = client.normalize_top_level_comment(thread)
-                    comments.append(comment)
-                    for reply_raw in _bounded(
-                        client.iter_replies(comment["comment_id"]), reply_limit
-                    ):
-                        replies.append(client.normalize_reply(reply_raw))
-            except YouTubeAPIError as exc:
-                if exc.category is YouTubeAPIErrorCategory.COMMENTS_DISABLED:
-                    LOGGER.info("Comentários desabilitados para o vídeo %s", video_id)
-                else:
-                    LOGGER.exception(
-                        "Falha ao atualizar comentários do vídeo %s", video_id
-                    )
-                    outcomes[video_id] = ("FAILED", str(exc))
-                    continue
+                )
+            )
             outcomes[video_id] = ("SUCCESS", None)
+        except YouTubeAPIError as exc:
+            if exc.category is YouTubeAPIErrorCategory.COMMENTS_DISABLED:
+                LOGGER.info("Comentários desabilitados para o vídeo %s", video_id)
+                outcomes[video_id] = ("SUCCESS", None)
+            else:
+                outcomes[video_id] = ("FAILED", str(exc))
+    append_raw(spark, catalog, raw, table_schemas["api_responses"])
+    merge_silver(
+        spark, catalog, "comments", comments, table_schemas["comments"], "comment_id"
+    )
+    replace_ingestion_comments(spark, catalog, ingestion_id, comments)
+    record_step_outcomes(spark, catalog, ingestion_id, "fetch_comments", outcomes)
+    return {"comments": len(comments)}
 
-        # Raw is persisted before normalized tables so it remains available
-        # for audit and reprocessing if a later Delta write fails.
-        append_raw(spark, catalog, raw_responses, table_schemas["api_responses"])
-        raw_written = True
-        merge_silver(
-            spark,
-            catalog,
-            "channels",
-            channels,
-            table_schemas["channels"],
-            "channel_id",
-        )
-        merge_silver(
-            spark, catalog, "videos", videos, table_schemas["videos"], "video_id"
-        )
-        merge_silver(
-            spark,
-            catalog,
-            "comments",
-            comments,
-            table_schemas["comments"],
-            "comment_id",
-        )
-        merge_silver(
-            spark, catalog, "replies", replies, table_schemas["replies"], "comment_id"
-        )
-        merge_snapshots(
-            spark,
-            catalog,
-            "channel_snapshots",
-            _snapshot_rows("channels", channels, ingestion_id, collected_at),
-            table_schemas["channel_snapshots"],
-            "channel_id",
-        )
-        merge_snapshots(
-            spark,
-            catalog,
-            "video_snapshots",
-            _snapshot_rows("videos", videos, ingestion_id, collected_at),
-            table_schemas["video_snapshots"],
-            "video_id",
-        )
 
-        for video_id, refresh_interval_hours in claimed_targets:
-            status, error_message = outcomes.get(
-                video_id, ("FAILED", "Vídeo não retornou um resultado de processamento")
-            )
-            finish_video_target(
-                spark,
-                catalog,
-                video_id,
-                ingestion_id,
-                status,
-                refresh_interval_hours,
-                error_message,
-            )
+def _comments_for_ingestion(
+    spark: Any, catalog: str, ingestion_id: str
+) -> dict[str, list[str]]:
+    outcomes = step_outcomes(spark, catalog, ingestion_id)
+    eligible_video_ids = [
+        video_id
+        for video_id, steps in outcomes.items()
+        if steps.get("fetch_comments", (None, None))[0] == "SUCCESS"
+    ]
+    return ingestion_comment_ids(spark, catalog, ingestion_id, eligible_video_ids)
 
-        succeeded = sum(status == "SUCCESS" for status, _ in outcomes.values())
-        failed = len(claimed_targets) - succeeded
-        run_status = "SUCCESS" if failed == 0 else "PARTIAL_SUCCESS"
-        finish_run(
+
+def _channel_name(spark: Any, catalog: str, video_ids: list[str]) -> str | None:
+    """Return the observed public channel names for the finalized targets."""
+    if not video_ids:
+        return None
+    values = ", ".join(f"'{video_id}'" for video_id in video_ids)
+    rows = spark.sql(
+        f"""
+        SELECT DISTINCT channel.title
+        FROM {catalog}.silver.videos AS video
+        INNER JOIN {catalog}.silver.channels AS channel
+          ON video.channel_id = channel.channel_id
+        WHERE video.video_id IN ({values})
+          AND channel.title IS NOT NULL
+        ORDER BY channel.title
+        """
+    ).collect()
+    names = [row.title for row in rows]
+    return ", ".join(names) or None
+
+
+def fetch_replies_step(
+    *,
+    spark: Any,
+    api_key: str,
+    ingestion_id: str,
+    max_replies_per_comment: str = "0",
+    catalog: str = "youtube_lakehouse",
+) -> dict[str, int]:
+    """Fetch replies for comments of the current ingestion's successful videos."""
+    reply_limit = _validate_limit(max_replies_per_comment, "max_replies_per_comment")
+    comments_by_video = _comments_for_ingestion(spark, catalog, ingestion_id)
+    if not comments_by_video:
+        return {"replies": 0}
+    raw, observe = _response_collector(ingestion_id)
+    table_schemas = schemas()
+    client = YouTubeClient(api_key=api_key, response_observer=observe)
+    replies: list[dict[str, Any]] = []
+    outcomes: dict[str, tuple[str, str | None]] = {}
+    for video_id, comment_ids in comments_by_video.items():
+        try:
+            for comment_id in comment_ids:
+                replies.extend(
+                    client.normalize_reply(reply)
+                    for reply in _bounded(client.iter_replies(comment_id), reply_limit)
+                )
+            outcomes[video_id] = ("SUCCESS", None)
+        except YouTubeAPIError as exc:
+            outcomes[video_id] = ("FAILED", str(exc))
+    append_raw(spark, catalog, raw, table_schemas["api_responses"])
+    merge_silver(
+        spark, catalog, "replies", replies, table_schemas["replies"], "comment_id"
+    )
+    record_step_outcomes(spark, catalog, ingestion_id, "fetch_replies", outcomes)
+    return {"replies": len(replies)}
+
+
+def finalize_ingestion_step(
+    *, spark: Any, ingestion_id: str, catalog: str = "youtube_lakehouse"
+) -> dict[str, int | str]:
+    """Close targets only after every required fetch step has succeeded."""
+    targets = ingestion_targets(spark, catalog, ingestion_id)
+    if not targets:
+        return {"ingestion_id": ingestion_id, "targets": 0, "status": "SUCCESS"}
+    outcomes_by_video = step_outcomes(spark, catalog, ingestion_id)
+    # Replies has already finished (or been skipped) when the finalizer runs.
+    # Do this before releasing targets so a cleanup failure remains retryable.
+    clear_ingestion_comments(spark, catalog, ingestion_id)
+    succeeded = 0
+    for video_id, refresh_interval_hours in targets:
+        steps = outcomes_by_video.get(video_id, {})
+        video_status, video_error = steps.get("fetch_videos", ("FAILED", None))
+        if video_status == "NOT_FOUND":
+            status, error_message = "NOT_FOUND", video_error
+        else:
+            failed = [
+                (step, error)
+                for step in FETCH_STEPS
+                if steps.get(step, ("FAILED", None))[0] != "SUCCESS"
+                for error in [steps.get(step, (None, "etapa não concluída"))[1]]
+            ]
+            if failed:
+                status = "FAILED"
+                error_message = "; ".join(
+                    f"{step}: {error or 'etapa não concluída'}"
+                    for step, error in failed
+                )
+            else:
+                status, error_message = "SUCCESS", None
+                succeeded += 1
+        finish_video_target(
             spark,
             catalog,
+            video_id,
             ingestion_id,
-            run_status,
-            channel_name=channel_name,
+            status,
+            refresh_interval_hours,
+            error_message,
         )
-    except Exception as exc:
-        if raw_responses and not raw_written:
-            append_raw(spark, catalog, raw_responses, table_schemas["api_responses"])
-        for video_id, refresh_interval_hours in claimed_targets:
-            finish_video_target(
-                spark,
-                catalog,
-                video_id,
-                ingestion_id,
-                "FAILED",
-                refresh_interval_hours,
-                str(exc),
-            )
-        finish_run(
-            spark,
-            catalog,
-            ingestion_id,
-            "FAILED",
-            str(exc),
-            channel_name=channel_name,
-        )
-        raise
-
-    result = {
-        "ingestion_id": ingestion_id,
-        "targets": len(claimed_targets),
-        "videos": len(videos),
-        "channels": len(channels),
-        "comments": len(comments),
-        "replies": len(replies),
-    }
-    LOGGER.info("Ingestão concluída: %s", result)
+    failed = len(targets) - succeeded
+    status = "SUCCESS" if failed == 0 else "PARTIAL_SUCCESS"
+    finish_run(
+        spark,
+        catalog,
+        ingestion_id,
+        status,
+        channel_name=_channel_name(
+            spark, catalog, [video_id for video_id, _ in targets]
+        ),
+    )
+    result = {"ingestion_id": ingestion_id, "targets": len(targets), "status": status}
+    LOGGER.info("Ingestão finalizada: %s", result)
     return result
+
+
+def run_ingestion(
+    *,
+    spark: Any,
+    api_key: str,
+    batch_size: str = "20",
+    max_comments_per_video: str = "0",
+    max_replies_per_comment: str = "0",
+    catalog: str = "youtube_lakehouse",
+) -> dict[str, int | str]:
+    """Run all Workflow steps sequentially for local execution and compatibility."""
+    claimed = claim_targets_step(spark=spark, batch_size=batch_size, catalog=catalog)
+    ingestion_id = str(claimed["ingestion_id"])
+    if not claimed["targets"]:
+        return {**claimed, "videos": 0, "channels": 0, "comments": 0, "replies": 0}
+    try:
+        videos = fetch_videos_step(
+            spark=spark, api_key=api_key, ingestion_id=ingestion_id, catalog=catalog
+        )
+        channels = fetch_channels_step(
+            spark=spark, api_key=api_key, ingestion_id=ingestion_id, catalog=catalog
+        )
+        comments = fetch_comments_step(
+            spark=spark,
+            api_key=api_key,
+            ingestion_id=ingestion_id,
+            max_comments_per_video=max_comments_per_video,
+            catalog=catalog,
+        )
+        replies = fetch_replies_step(
+            spark=spark,
+            api_key=api_key,
+            ingestion_id=ingestion_id,
+            max_replies_per_comment=max_replies_per_comment,
+            catalog=catalog,
+        )
+    except Exception:
+        finalize_ingestion_step(spark=spark, ingestion_id=ingestion_id, catalog=catalog)
+        raise
+    return {
+        **finalize_ingestion_step(
+            spark=spark, ingestion_id=ingestion_id, catalog=catalog
+        ),
+        **videos,
+        **channels,
+        **comments,
+        **replies,
+    }

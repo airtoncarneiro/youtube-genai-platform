@@ -386,3 +386,154 @@ def finish_video_target(
         )
     finally:
         spark.catalog.dropTempView(view_name)
+
+
+def ingestion_targets(
+    spark: Any, catalog: str, ingestion_id: str
+) -> list[tuple[str, int]]:
+    """Return the targets owned by one ingestion run.
+
+    ``video_processing_state`` is the durable hand-off between Workflow tasks.
+    The query intentionally only returns targets still owned by ``ingestion_id``.
+    """
+    rows = spark.sql(
+        f"""
+        SELECT target.video_id, target.refresh_interval_hours
+        FROM {catalog}.control.video_targets AS target
+        INNER JOIN {catalog}.control.video_processing_state AS state
+          ON target.video_id = state.video_id
+        WHERE state.last_ingestion_id = '{ingestion_id}'
+          AND state.status = 'PROCESSING'
+        ORDER BY target.video_id
+        """
+    ).collect()
+    return [(row.video_id, row.refresh_interval_hours) for row in rows]
+
+
+def record_step_outcomes(
+    spark: Any,
+    catalog: str,
+    ingestion_id: str,
+    step: str,
+    outcomes: dict[str, tuple[str, str | None]],
+) -> None:
+    """Upsert the outcome of one Workflow step for each video.
+
+    A rerun of a task replaces its prior result for the same ingestion and
+    video. This makes task retries safe while preserving the latest error for
+    the finalizer to act on.
+    """
+    if not outcomes:
+        return
+
+    completed_at = datetime.now(timezone.utc)
+    view_name = f"step_outcomes_{uuid4().hex}"
+    spark.createDataFrame(
+        [
+            (ingestion_id, video_id, step, status, completed_at, error_message)
+            for video_id, (status, error_message) in outcomes.items()
+        ],
+        "ingestion_id string, video_id string, step string, status string, "
+        "completed_at timestamp, error_message string",
+    ).createOrReplaceTempView(view_name)
+    try:
+        spark.sql(
+            f"""
+            MERGE INTO {catalog}.control.ingestion_step_outcomes AS target
+            USING {view_name} AS source
+            ON target.ingestion_id = source.ingestion_id
+              AND target.video_id = source.video_id
+              AND target.step = source.step
+            WHEN MATCHED THEN UPDATE SET
+              target.status = source.status,
+              target.completed_at = source.completed_at,
+              target.error_message = source.error_message
+            WHEN NOT MATCHED THEN INSERT *
+            """
+        )
+    finally:
+        spark.catalog.dropTempView(view_name)
+
+
+def replace_ingestion_comments(
+    spark: Any,
+    catalog: str,
+    ingestion_id: str,
+    comments: list[dict[str, Any]],
+) -> None:
+    """Persist the exact top-level comments returned in one ingestion.
+
+    This is a short-lived operational hand-off, not a second silver entity. It
+    prevents the replies task from accidentally processing comments retained
+    from a prior ingestion of the same video.
+    """
+    spark.sql(
+        f"""
+        DELETE FROM {catalog}.control.ingestion_comments
+        WHERE ingestion_id = '{ingestion_id}'
+        """
+    )
+    rows = [
+        (ingestion_id, row["video_id"], row["comment_id"])
+        for row in comments
+        if row.get("video_id") and row.get("comment_id")
+    ]
+    if not rows:
+        return
+    spark.createDataFrame(
+        rows,
+        "ingestion_id string, video_id string, comment_id string",
+    ).dropDuplicates(["ingestion_id", "comment_id"]).write.mode("append").format(
+        "delta"
+    ).saveAsTable(f"{catalog}.control.ingestion_comments")
+
+
+def clear_ingestion_comments(spark: Any, catalog: str, ingestion_id: str) -> None:
+    """Remove operational comment hand-off rows after ingestion finalization."""
+    spark.sql(
+        f"""
+        DELETE FROM {catalog}.control.ingestion_comments
+        WHERE ingestion_id = '{ingestion_id}'
+        """
+    )
+
+
+def ingestion_comment_ids(
+    spark: Any, catalog: str, ingestion_id: str, video_ids: list[str]
+) -> dict[str, list[str]]:
+    """Return comments staged by ``fetch_comments`` for the requested videos."""
+    result = {video_id: [] for video_id in video_ids}
+    if not video_ids:
+        return result
+    values = ", ".join(f"'{video_id}'" for video_id in video_ids)
+    rows = spark.sql(
+        f"""
+        SELECT video_id, comment_id
+        FROM {catalog}.control.ingestion_comments
+        WHERE ingestion_id = '{ingestion_id}'
+          AND video_id IN ({values})
+        """
+    ).collect()
+    for row in rows:
+        result[row.video_id].append(row.comment_id)
+    return result
+
+
+def step_outcomes(
+    spark: Any, catalog: str, ingestion_id: str
+) -> dict[str, dict[str, tuple[str, str | None]]]:
+    """Return persisted outcomes indexed by video and Workflow step."""
+    rows = spark.sql(
+        f"""
+        SELECT video_id, step, status, error_message
+        FROM {catalog}.control.ingestion_step_outcomes
+        WHERE ingestion_id = '{ingestion_id}'
+        """
+    ).collect()
+    result: dict[str, dict[str, tuple[str, str | None]]] = {}
+    for row in rows:
+        result.setdefault(row.video_id, {})[row.step] = (
+            row.status,
+            row.error_message,
+        )
+    return result
