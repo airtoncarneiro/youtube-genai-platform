@@ -30,6 +30,29 @@ def _get_api_key(spark: object, secret_scope: str, secret_key: str) -> str:
         ) from exc
 
 
+def _get_spark_session() -> object:
+    """Return the Job session or open a Databricks Connect session for debugging.
+
+    A Databricks Job already has an active Spark session. When this module runs
+    locally under the VS Code Databricks Connect integration, a local
+    ``SparkSession.builder`` is unsupported and the remote session must be
+    created through ``DatabricksSession`` instead.
+    """
+    from pyspark.sql import SparkSession
+
+    active_session = SparkSession.getActiveSession()
+    if active_session:
+        return active_session
+
+    try:
+        from databricks.connect import DatabricksSession
+    except ModuleNotFoundError:
+        # This fallback supports a regular local/classic Spark environment.
+        return SparkSession.builder.getOrCreate()
+
+    return DatabricksSession.builder.serverless().getOrCreate()
+
+
 def run(
     batch_size: str = "20",
     max_comments_per_video: str = "0",
@@ -44,9 +67,7 @@ def run(
     Databricks task parameters; validation and conversion happen in the
     pipeline layer.
     """
-    from pyspark.sql import SparkSession
-
-    spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
+    spark = _get_spark_session()
     api_key = _get_api_key(spark, secret_scope, secret_key)
     result = run_ingestion(
         spark=spark,
@@ -63,3 +84,7 @@ def main() -> None:
     """Configure logging and run the ingestion using environment parameters."""
     logging.basicConfig(level=logging.INFO)
     run()
+
+
+if __name__ == "__main__":
+    main()

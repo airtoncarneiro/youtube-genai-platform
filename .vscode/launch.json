@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug main.py",
+      "type": "debugpy",
+      "request": "launch",
+      "databricks": true,
+      "program": "${workspaceFolder}/src/youtube_etl_genai/main.py",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      }
+    }
+  ]
+}
