@@ -140,6 +140,8 @@ preservada na mensagem de erro registrada nas tabelas de controle.
 ```text
 .
 ├── src/
+│   ├── dashboards/
+│   │   └── youtube_operational.lvdash.json # dashboard de operação e evolução
 │   ├── notebooks/
 │   │   ├── 00_setup.ipynb                  # cria catálogo, schemas e tabelas
 │   │   ├── 01_youtube_ingestion_test.ipynb # consulta as tabelas do lakehouse
@@ -155,6 +157,7 @@ preservada na mensagem de erro registrada nas tabelas de controle.
 │       ├── persistence.py                  # schemas, Delta MERGE e estado de controle
 │       └── youtube_client.py               # cliente reutilizável da YouTube Data API
 ├── resources/
+│   ├── youtube_operational.dashboard.yml   # recurso do dashboard no Bundle
 │   └── youtube_ingestion.job.yml           # Job serverless do Bundle
 ├── tests/
 ├── databricks.yml
@@ -283,6 +286,32 @@ Job. `bundle run` apenas executa o Job já implantado. Pelo plugin Databricks do
 VS Code, escolha **Run now** no Job/Workflow `dev-youtube-ingestion`; não use a
 opção de executar o notebook atual, pois ela cria uma execução avulsa que não
 representa este pipeline.
+
+## Dashboard operacional
+
+O Bundle também versiona o dashboard **YouTube - Operação e evolução**. Ele
+mostra o estado dos vídeos monitorados, falhas pendentes, a evolução diária de
+views e inscritos, as métricas atuais por vídeo e o histórico das execuções.
+As séries temporais usam somente o último snapshot de cada entidade em cada
+dia, evitando somar múltiplas coletas do mesmo vídeo ou canal.
+
+O dashboard usa quatro views de apresentação no schema `silver`:
+`dashboard_ingestion_runs`, `dashboard_video_targets`,
+`dashboard_video_metrics` e `dashboard_channel_metrics`. Elas são criadas pelo
+notebook `00_setup.ipynb`; execute novamente apenas a célula das tabelas
+`silver` ao atualizar um ambiente já existente.
+
+No target `dev`, o Bundle já aponta para o SQL Warehouse Serverless Starter.
+Para outro target, configure `dashboard_warehouse_id` com o ID de um SQL
+Warehouse adequado na seção `targets.<nome>.variables`.
+
+```bash
+databricks bundle validate --strict -t dev
+databricks bundle deploy -t dev
+```
+
+O dashboard é criado como rascunho pelo deploy. Publique-o no workspace após a
+validação visual e conceda acesso apenas às pessoas que deverão consultá-lo.
 
 O Job foi implantado e executado com sucesso no target `dev` durante a validação
 inicial desta implementação.
