@@ -4,6 +4,5 @@ resources:
       display_name: "${bundle.target} YouTube - Operação e evolução"
       file_path: ../src/dashboards/youtube_operational.lvdash.json
       warehouse_id: ${var.dashboard_warehouse_id}
-      # The setup notebook currently provisions these presentation views in this catalog.
-      dataset_catalog: youtube_lakehouse
+      dataset_catalog: ${var.catalog}
       dataset_schema: silver
