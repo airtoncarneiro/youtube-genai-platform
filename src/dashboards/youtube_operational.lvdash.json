@@ -1,0 +1,180 @@
+{
+  "datasets": [
+    {
+      "name": "ds_targets",
+      "displayName": "Vídeos monitorados",
+      "queryLines": [
+        "SELECT video_id, is_active, priority, refresh_interval_hours, status, last_succeeded_at, next_refresh_at, attempt_count, error_message \n",
+        "FROM dashboard_video_targets"
+      ],
+      "columns": [
+        {
+          "displayName": "Vídeos ativos",
+          "description": "Quantidade de vídeos habilitados para coleta",
+          "expression": "SUM(CASE WHEN `is_active` THEN 1 ELSE 0 END)"
+        },
+        {
+          "displayName": "Vídeos com falha",
+          "description": "Quantidade de vídeos cujo último processamento falhou",
+          "expression": "SUM(CASE WHEN `is_active` AND `status` = 'FAILED' THEN 1 ELSE 0 END)"
+        },
+        {
+          "displayName": "Vídeos processados",
+          "description": "Quantidade de vídeos com ao menos uma coleta concluída",
+          "expression": "SUM(CASE WHEN `last_succeeded_at` IS NOT NULL THEN 1 ELSE 0 END)"
+        }
+      ]
+    },
+    {
+      "name": "ds_runs",
+      "displayName": "Execuções de ingestão",
+      "queryLines": [
+        "SELECT ingestion_id, channel_name, started_at, ended_at, status, error_message, duration_seconds \n",
+        "FROM dashboard_ingestion_runs \n",
+        "WHERE started_at >= CURRENT_TIMESTAMP() - INTERVAL 30 DAYS \n",
+        "ORDER BY started_at DESC \n",
+        "LIMIT 500"
+      ]
+    },
+    {
+      "name": "ds_video_trend",
+      "displayName": "Evolução diária dos vídeos",
+      "queryLines": [
+        "WITH dates AS (\n",
+        "  SELECT EXPLODE(SEQUENCE(CURRENT_DATE() - INTERVAL 89 DAYS, CURRENT_DATE(), INTERVAL 1 DAY)) AS collected_date\n",
+        "), active_videos AS (\n",
+        "  SELECT DISTINCT video_id FROM dashboard_video_targets WHERE is_active\n",
+        ")\n",
+        "SELECT active.video_id, MAX_BY(metrics.video_title, metrics.collected_at) AS video_title, MAX_BY(metrics.channel_title, metrics.collected_at) AS channel_title, dates.collected_date, MAX_BY(metrics.view_count, metrics.collected_at) AS view_count, MAX_BY(metrics.like_count, metrics.collected_at) AS like_count, MAX_BY(metrics.comment_count, metrics.collected_at) AS comment_count \n",
+        "FROM dates CROSS JOIN active_videos AS active \n",
+        "LEFT JOIN dashboard_video_metrics AS metrics ON metrics.video_id = active.video_id AND metrics.collected_at < dates.collected_date + INTERVAL 1 DAY \n",
+        "GROUP BY active.video_id, dates.collected_date \n",
+        "HAVING view_count IS NOT NULL \n",
+        "ORDER BY collected_date"
+      ]
+    },
+    {
+      "name": "ds_channel_trend",
+      "displayName": "Evolução diária dos canais",
+      "queryLines": [
+        "WITH dates AS (\n",
+        "  SELECT EXPLODE(SEQUENCE(CURRENT_DATE() - INTERVAL 89 DAYS, CURRENT_DATE(), INTERVAL 1 DAY)) AS collected_date\n",
+        "), active_channels AS (\n",
+        "  SELECT DISTINCT metrics.channel_id FROM dashboard_video_metrics AS metrics INNER JOIN dashboard_video_targets AS targets ON metrics.video_id = targets.video_id WHERE targets.is_active\n",
+        ")\n",
+        "SELECT active.channel_id, MAX_BY(metrics.channel_title, metrics.collected_at) AS channel_title, dates.collected_date, MAX_BY(metrics.subscriber_count, metrics.collected_at) AS subscriber_count, MAX_BY(metrics.video_count, metrics.collected_at) AS video_count \n",
+        "FROM dates CROSS JOIN active_channels AS active \n",
+        "LEFT JOIN dashboard_channel_metrics AS metrics ON metrics.channel_id = active.channel_id AND metrics.collected_at < dates.collected_date + INTERVAL 1 DAY \n",
+        "GROUP BY active.channel_id, dates.collected_date \n",
+        "HAVING subscriber_count IS NOT NULL \n",
+        "ORDER BY collected_date"
+      ]
+    },
+    {
+      "name": "ds_latest_videos",
+      "displayName": "Métricas atuais por vídeo",
+      "queryLines": [
+        "WITH ranked_snapshots AS (\n",
+        "  SELECT video_id, video_title, channel_title, collected_at, view_count, like_count, comment_count,\n",
+        "         ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY collected_at DESC) AS row_num\n",
+        "  FROM dashboard_video_metrics AS metrics\n",
+        "  INNER JOIN dashboard_video_targets AS targets ON metrics.video_id = targets.video_id\n",
+        "  WHERE targets.is_active\n",
+        ")\n",
+        "SELECT video_id, video_title, channel_title, collected_at, view_count, like_count, comment_count \n",
+        "FROM ranked_snapshots \n",
+        "WHERE row_num = 1 \n",
+        "ORDER BY view_count DESC"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "overview",
+      "displayName": "Visão geral",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "dashboard-header",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# YouTube — operação e evolução\n",
+                "Acompanhe a saúde da coleta e a evolução pública de vídeos e canais. As séries usam o último snapshot disponível de cada entidade por dia."
+              ]
+            }
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 2}
+        },
+        {
+          "widget": {
+            "name": "kpi-active-targets",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_targets", "fields": [{"name": "measure(Vídeos ativos)", "expression": "MEASURE(`Vídeos ativos`)"}], "disaggregated": false}}],
+            "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": {"fieldName": "measure(Vídeos ativos)", "displayName": "Vídeos ativos"}}, "frame": {"showTitle": true, "title": "Vídeos ativos"}}
+          },
+          "position": {"x": 0, "y": 2, "width": 4, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi-processed-targets",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_targets", "fields": [{"name": "measure(Vídeos processados)", "expression": "MEASURE(`Vídeos processados`)"}], "disaggregated": false}}],
+            "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": {"fieldName": "measure(Vídeos processados)", "displayName": "Vídeos processados"}}, "frame": {"showTitle": true, "title": "Vídeos processados"}}
+          },
+          "position": {"x": 4, "y": 2, "width": 4, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi-failed-targets",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_targets", "fields": [{"name": "measure(Vídeos com falha)", "expression": "MEASURE(`Vídeos com falha`)"}], "disaggregated": false}}],
+            "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": {"fieldName": "measure(Vídeos com falha)", "displayName": "Vídeos com falha"}}, "frame": {"showTitle": true, "title": "Falhas pendentes"}}
+          },
+          "position": {"x": 8, "y": 2, "width": 4, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "video-views-trend",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_video_trend", "fields": [{"name": "collected_date", "expression": "`collected_date`"}, {"name": "sum(view_count)", "expression": "SUM(`view_count`)"}], "disaggregated": false}}],
+            "spec": {"version": 3, "widgetType": "line", "encodings": {"x": {"fieldName": "collected_date", "scale": {"type": "temporal"}, "displayName": "Data"}, "y": {"fieldName": "sum(view_count)", "scale": {"type": "quantitative", "domainMin": 0}, "displayName": "Views"}}, "frame": {"showTitle": true, "title": "Views totais dos vídeos monitorados"}}
+          },
+          "position": {"x": 0, "y": 5, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "channel-subscribers-trend",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_channel_trend", "fields": [{"name": "collected_date", "expression": "`collected_date`"}, {"name": "sum(subscriber_count)", "expression": "SUM(`subscriber_count`)"}], "disaggregated": false}}],
+            "spec": {"version": 3, "widgetType": "line", "encodings": {"x": {"fieldName": "collected_date", "scale": {"type": "temporal"}, "displayName": "Data"}, "y": {"fieldName": "sum(subscriber_count)", "scale": {"type": "quantitative", "domainMin": 0}, "displayName": "Inscritos"}}, "frame": {"showTitle": true, "title": "Inscritos totais dos canais"}}
+          },
+          "position": {"x": 6, "y": 5, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "latest-videos-table",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_latest_videos", "fields": [{"name": "video_title", "expression": "`video_title`"}, {"name": "channel_title", "expression": "`channel_title`"}, {"name": "collected_at", "expression": "`collected_at`"}, {"name": "view_count", "expression": "`view_count`"}, {"name": "like_count", "expression": "`like_count`"}, {"name": "comment_count", "expression": "`comment_count`"}], "disaggregated": true}}],
+            "spec": {"version": 2, "widgetType": "table", "encodings": {"columns": [{"fieldName": "video_title", "displayName": "Vídeo"}, {"fieldName": "channel_title", "displayName": "Canal"}, {"fieldName": "collected_at", "displayName": "Coletado em"}, {"fieldName": "view_count", "displayName": "Views"}, {"fieldName": "like_count", "displayName": "Likes"}, {"fieldName": "comment_count", "displayName": "Comentários"}]}, "frame": {"showTitle": true, "title": "Métricas atuais por vídeo"}}
+          },
+          "position": {"x": 0, "y": 10, "width": 12, "height": 6}
+        },
+        {
+          "widget": {
+            "name": "recent-runs-table",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_runs", "fields": [{"name": "channel_name", "expression": "`channel_name`"}, {"name": "started_at", "expression": "`started_at`"}, {"name": "status", "expression": "`status`"}, {"name": "duration_seconds", "expression": "`duration_seconds`"}, {"name": "error_message", "expression": "`error_message`"}], "disaggregated": true}}],
+            "spec": {"version": 2, "widgetType": "table", "encodings": {"columns": [{"fieldName": "channel_name", "displayName": "Canal"}, {"fieldName": "started_at", "displayName": "Iniciado em"}, {"fieldName": "status", "displayName": "Status"}, {"fieldName": "duration_seconds", "displayName": "Duração (s)"}, {"fieldName": "error_message", "displayName": "Erro"}]}, "frame": {"showTitle": true, "title": "Execuções recentes"}}
+          },
+          "position": {"x": 0, "y": 16, "width": 12, "height": 6}
+        }
+      ]
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "canvasBackgroundColor": {"light": "#FCFCFC", "dark": "#1F272D"},
+      "widgetBackgroundColor": {"light": "#FFFFFF", "dark": "#11171C"},
+      "widgetBorderColor": {"light": "#FFFFFF", "dark": "#11171C"},
+      "fontColor": {"light": "#11171C", "dark": "#E8ECF0"},
+      "selectionColor": {"light": "#2272B4", "dark": "#8ACAFF"},
+      "visualizationColors": ["#094074", "#3C6997", "#5ADBFF", "#FFDD4A", "#FE9000"],
+      "widgetHeaderAlignment": "LEFT"
+    }
+  }
+}
