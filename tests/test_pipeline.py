@@ -94,9 +94,18 @@ def test_fetch_videos_persists_raw_current_snapshot_and_outcome(
     events: list[tuple[str, object]] = []
 
     class FakeClient:
-        def __init__(self, api_key: str, response_observer: object) -> None:
+        def __init__(
+            self,
+            api_key: str,
+            response_observer: object,
+            ingestion_id: str,
+            api_cost_observer: object,
+        ) -> None:
             assert api_key == "api-key"
+            assert ingestion_id == "run-1"
+            assert api_cost_observer is None
             self.response_observer = response_observer
+            self.api_cost_units = 1
 
         def get_videos(self, video_ids: list[str]) -> list[dict[str, object]]:
             assert video_ids == ["video-1", "missing"]
@@ -140,7 +149,15 @@ def test_fetch_videos_persists_raw_current_snapshot_and_outcome(
 
     assert pipeline.fetch_videos_step(
         spark=object(), api_key="api-key", ingestion_id="run-1"
-    ) == {"videos": 1}
+    ) == {
+        "status": "PARTIAL_SUCCESS",
+        "videos": 1,
+        "videos_attempted": 2,
+        "videos_succeeded": 1,
+        "videos_failed": 1,
+        "records_fetched": 1,
+        "api_cost_units": 1,
+    }
     assert [event[0] for event in events] == [
         "raw",
         "silver",

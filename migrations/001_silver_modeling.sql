@@ -151,7 +151,7 @@ ALTER TABLE youtube_lakehouse.silver.video_tags
   REFERENCES youtube_lakehouse.silver.videos(video_id)
   NOT ENFORCED;
 
-CREATE OR REPLACE VIEW youtube_lakehouse.silver.dashboard_video_metrics
+CREATE OR REPLACE VIEW youtube_lakehouse.silver.vw_dashboard_video_metrics
 COMMENT 'Camada de apresentação do dashboard: snapshots temporais de métricas de vídeo'
 AS
 SELECT
@@ -172,4 +172,4 @@ LEFT JOIN youtube_lakehouse.silver.channels AS channel
 -- Valide antes de descartar os backups:
 -- SELECT COUNT(*) FROM youtube_lakehouse.silver.videos;
 -- SELECT COUNT(*) FROM youtube_lakehouse.silver.videos_legacy_001;
--- SELECT * FROM youtube_lakehouse.silver.dashboard_video_metrics LIMIT 10;
+-- SELECT * FROM youtube_lakehouse.silver.vw_dashboard_video_metrics LIMIT 10;

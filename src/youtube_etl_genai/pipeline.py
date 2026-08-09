@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from datetime import datetime, timezone
 from itertools import islice
 from typing import Any, Iterable, Iterator
@@ -33,6 +34,27 @@ from youtube_etl_genai.youtube_client import (
 LOGGER = logging.getLogger(__name__)
 
 FETCH_STEPS = ("fetch_videos", "fetch_channels", "fetch_comments", "fetch_replies")
+
+
+def _step_result(
+    *,
+    record_name: str,
+    records_fetched: int,
+    videos_attempted: int,
+    videos_succeeded: int,
+    videos_failed: int,
+    api_cost_units: int = 0,
+) -> dict[str, int | str]:
+    """Return a uniform, serializable operational result for a Job task."""
+    return {
+        "status": "SUCCESS" if videos_failed == 0 else "PARTIAL_SUCCESS",
+        record_name: records_fetched,
+        "videos_attempted": videos_attempted,
+        "videos_succeeded": videos_succeeded,
+        "videos_failed": videos_failed,
+        "records_fetched": records_fetched,
+        "api_cost_units": api_cost_units,
+    }
 
 
 def _validate_limit(value: str, name: str, allow_zero: bool = True) -> int:
@@ -109,22 +131,47 @@ def claim_targets_step(
     targets = claim_video_targets(spark, catalog, ingestion_id, requested_batch_size)
     if not targets:
         finish_run(spark, catalog, ingestion_id, "SUCCESS")
-    result = {"ingestion_id": ingestion_id, "targets": len(targets)}
+    result = {
+        "ingestion_id": ingestion_id,
+        "status": "SUCCESS",
+        "targets": len(targets),
+        "videos_attempted": len(targets),
+        "videos_succeeded": len(targets),
+        "videos_failed": 0,
+        "records_fetched": len(targets),
+        "api_cost_units": 0,
+    }
     LOGGER.info("Targets reservados: %s", result)
     return result
 
 
 def fetch_videos_step(
-    *, spark: Any, api_key: str, ingestion_id: str, catalog: str = "youtube_lakehouse"
-) -> dict[str, int]:
+    *,
+    spark: Any,
+    api_key: str,
+    ingestion_id: str,
+    catalog: str = "youtube_lakehouse",
+    api_cost_observer: Callable[[int], None] | None = None,
+) -> dict[str, int | str]:
     """Fetch videos owned by an ingestion and persist current data and snapshots."""
     targets = ingestion_targets(spark, catalog, ingestion_id)
     if not targets:
-        return {"videos": 0}
+        return _step_result(
+            record_name="videos",
+            records_fetched=0,
+            videos_attempted=0,
+            videos_succeeded=0,
+            videos_failed=0,
+        )
 
     raw, observe = _response_collector(ingestion_id)
     table_schemas = schemas()
-    client = YouTubeClient(api_key=api_key, response_observer=observe)
+    client = YouTubeClient(
+        api_key=api_key,
+        response_observer=observe,
+        ingestion_id=ingestion_id,
+        api_cost_observer=api_cost_observer,
+    )
     target_ids = [video_id for video_id, _ in targets]
     try:
         videos = [client.normalize_video(row) for row in client.get_videos(target_ids)]
@@ -157,7 +204,14 @@ def fetch_videos_step(
             for video_id in target_ids
         },
     )
-    return {"videos": len(videos)}
+    return _step_result(
+        record_name="videos",
+        records_fetched=len(videos),
+        videos_attempted=len(target_ids),
+        videos_succeeded=len(found),
+        videos_failed=len(target_ids) - len(found),
+        api_cost_units=client.api_cost_units,
+    )
 
 
 def _successful_video_ids(spark: Any, catalog: str, ingestion_id: str) -> list[str]:
@@ -186,19 +240,35 @@ def _video_channels(
 
 
 def fetch_channels_step(
-    *, spark: Any, api_key: str, ingestion_id: str, catalog: str = "youtube_lakehouse"
-) -> dict[str, int]:
+    *,
+    spark: Any,
+    api_key: str,
+    ingestion_id: str,
+    catalog: str = "youtube_lakehouse",
+    api_cost_observer: Callable[[int], None] | None = None,
+) -> dict[str, int | str]:
     """Fetch channels referenced by the successfully fetched videos."""
     video_ids = _successful_video_ids(spark, catalog, ingestion_id)
     if not video_ids:
-        return {"channels": 0}
+        return _step_result(
+            record_name="channels",
+            records_fetched=0,
+            videos_attempted=0,
+            videos_succeeded=0,
+            videos_failed=0,
+        )
     video_channels = _video_channels(spark, catalog, ingestion_id, video_ids)
     channel_ids = sorted(
         {channel_id for channel_id in video_channels.values() if channel_id}
     )
     raw, observe = _response_collector(ingestion_id)
     table_schemas = schemas()
-    client = YouTubeClient(api_key=api_key, response_observer=observe)
+    client = YouTubeClient(
+        api_key=api_key,
+        response_observer=observe,
+        ingestion_id=ingestion_id,
+        api_cost_observer=api_cost_observer,
+    )
     try:
         channels = [
             client.normalize_channel(row) for row in client.get_channels(channel_ids)
@@ -233,7 +303,17 @@ def fetch_channels_step(
             for video_id, channel_id in video_channels.items()
         },
     )
-    return {"channels": len(channels)}
+    videos_succeeded = sum(
+        channel_id in found_channels for channel_id in video_channels.values()
+    )
+    return _step_result(
+        record_name="channels",
+        records_fetched=len(channels),
+        videos_attempted=len(video_ids),
+        videos_succeeded=videos_succeeded,
+        videos_failed=len(video_ids) - videos_succeeded,
+        api_cost_units=client.api_cost_units,
+    )
 
 
 def fetch_comments_step(
@@ -243,15 +323,27 @@ def fetch_comments_step(
     ingestion_id: str,
     max_comments_per_video: str = "0",
     catalog: str = "youtube_lakehouse",
-) -> dict[str, int]:
+    api_cost_observer: Callable[[int], None] | None = None,
+) -> dict[str, int | str]:
     """Fetch top-level comments independently for every fetched video."""
     comment_limit = _validate_limit(max_comments_per_video, "max_comments_per_video")
     video_ids = _successful_video_ids(spark, catalog, ingestion_id)
     if not video_ids:
-        return {"comments": 0}
+        return _step_result(
+            record_name="comments",
+            records_fetched=0,
+            videos_attempted=0,
+            videos_succeeded=0,
+            videos_failed=0,
+        )
     raw, observe = _response_collector(ingestion_id)
     table_schemas = schemas()
-    client = YouTubeClient(api_key=api_key, response_observer=observe)
+    client = YouTubeClient(
+        api_key=api_key,
+        response_observer=observe,
+        ingestion_id=ingestion_id,
+        api_cost_observer=api_cost_observer,
+    )
     comments: list[dict[str, Any]] = []
     outcomes: dict[str, tuple[str, str | None]] = {}
     for video_id in video_ids:
@@ -275,7 +367,15 @@ def fetch_comments_step(
     )
     replace_ingestion_comments(spark, catalog, ingestion_id, comments)
     record_step_outcomes(spark, catalog, ingestion_id, "fetch_comments", outcomes)
-    return {"comments": len(comments)}
+    videos_succeeded = sum(status == "SUCCESS" for status, _ in outcomes.values())
+    return _step_result(
+        record_name="comments",
+        records_fetched=len(comments),
+        videos_attempted=len(video_ids),
+        videos_succeeded=videos_succeeded,
+        videos_failed=len(video_ids) - videos_succeeded,
+        api_cost_units=client.api_cost_units,
+    )
 
 
 def _comments_for_ingestion(
@@ -317,15 +417,27 @@ def fetch_replies_step(
     ingestion_id: str,
     max_replies_per_comment: str = "0",
     catalog: str = "youtube_lakehouse",
-) -> dict[str, int]:
+    api_cost_observer: Callable[[int], None] | None = None,
+) -> dict[str, int | str]:
     """Fetch replies for comments of the current ingestion's successful videos."""
     reply_limit = _validate_limit(max_replies_per_comment, "max_replies_per_comment")
     comments_by_video = _comments_for_ingestion(spark, catalog, ingestion_id)
     if not comments_by_video:
-        return {"replies": 0}
+        return _step_result(
+            record_name="replies",
+            records_fetched=0,
+            videos_attempted=0,
+            videos_succeeded=0,
+            videos_failed=0,
+        )
     raw, observe = _response_collector(ingestion_id)
     table_schemas = schemas()
-    client = YouTubeClient(api_key=api_key, response_observer=observe)
+    client = YouTubeClient(
+        api_key=api_key,
+        response_observer=observe,
+        ingestion_id=ingestion_id,
+        api_cost_observer=api_cost_observer,
+    )
     replies: list[dict[str, Any]] = []
     outcomes: dict[str, tuple[str, str | None]] = {}
     for video_id, comment_ids in comments_by_video.items():
@@ -343,7 +455,15 @@ def fetch_replies_step(
         spark, catalog, "replies", replies, table_schemas["replies"], "comment_id"
     )
     record_step_outcomes(spark, catalog, ingestion_id, "fetch_replies", outcomes)
-    return {"replies": len(replies)}
+    videos_succeeded = sum(status == "SUCCESS" for status, _ in outcomes.values())
+    return _step_result(
+        record_name="replies",
+        records_fetched=len(replies),
+        videos_attempted=len(comments_by_video),
+        videos_succeeded=videos_succeeded,
+        videos_failed=len(comments_by_video) - videos_succeeded,
+        api_cost_units=client.api_cost_units,
+    )
 
 
 def finalize_ingestion_step(
@@ -352,7 +472,16 @@ def finalize_ingestion_step(
     """Close targets only after every required fetch step has succeeded."""
     targets = ingestion_targets(spark, catalog, ingestion_id)
     if not targets:
-        return {"ingestion_id": ingestion_id, "targets": 0, "status": "SUCCESS"}
+        return {
+            "ingestion_id": ingestion_id,
+            "targets": 0,
+            "status": "SUCCESS",
+            "videos_attempted": 0,
+            "videos_succeeded": 0,
+            "videos_failed": 0,
+            "records_fetched": 0,
+            "api_cost_units": 0,
+        }
     outcomes_by_video = step_outcomes(spark, catalog, ingestion_id)
     # Replies has already finished (or been skipped) when the finalizer runs.
     # Do this before releasing targets so a cleanup failure remains retryable.
@@ -399,7 +528,16 @@ def finalize_ingestion_step(
             spark, catalog, [video_id for video_id, _ in targets]
         ),
     )
-    result = {"ingestion_id": ingestion_id, "targets": len(targets), "status": status}
+    result = {
+        "ingestion_id": ingestion_id,
+        "targets": len(targets),
+        "status": status,
+        "videos_attempted": len(targets),
+        "videos_succeeded": succeeded,
+        "videos_failed": failed,
+        "records_fetched": len(targets),
+        "api_cost_units": 0,
+    }
     LOGGER.info("Ingestão finalizada: %s", result)
     return result
 

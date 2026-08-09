@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import logging
 import os
 
+from youtube_etl_genai.observability import configure_job_logging
 from youtube_etl_genai.pipeline import run_ingestion
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = configure_job_logging()
 
 
 def _get_api_key(spark: object, secret_scope: str, secret_key: str) -> str:
@@ -82,7 +82,7 @@ def run(
 
 def main() -> None:
     """Configure logging and run the ingestion using environment parameters."""
-    logging.basicConfig(level=logging.INFO)
+    configure_job_logging()
     run()
 
 

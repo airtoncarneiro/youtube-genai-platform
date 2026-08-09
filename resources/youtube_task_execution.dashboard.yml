@@ -1,0 +1,8 @@
+resources:
+  dashboards:
+    youtube_task_execution:
+      display_name: "YouTube - Saúde da ingestão"
+      file_path: ../src/dashboards/youtube_task_execution.lvdash.json
+      warehouse_id: ${var.dashboard_warehouse_id}
+      dataset_catalog: ${var.catalog}
+      dataset_schema: control

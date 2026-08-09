@@ -55,6 +55,7 @@ fica na variável `catalog` do Bundle e pode ser substituído por target.
 | `control` | `ingestion_runs` | Auditoria da execução: início, fim, estado, canal ou canais observados e erro global. |
 | `control` | `ingestion_step_outcomes` | Resultado de cada fetch por vídeo e execução; permite diagnosticar falhas e finalizar o target somente quando todas as etapas terminarem. |
 | `control` | `ingestion_comments` | Handoff temporário dos comentários retornados na execução, usado exclusivamente pela task de replies. |
+| `control` | `task_execution_logs` | Resumo idempotente de cada tentativa de task: duração, estado, contagens por vídeo, registros retornados, custo estimado da API e erro técnico. |
 | `raw` | `api_responses` | Respostas JSON originais da API, preservadas para auditoria e reprocessamento. |
 | `silver` | `channels`, `videos` | Estado atual do canal e do vídeo, incluindo as contagens públicas mais recentes. `videos` referencia `channels` por `channel_id`. |
 | `silver` | `video_tags` | Bridge normalizada de tags: uma associação vídeo-tag por linha. |
@@ -129,6 +130,11 @@ CREATE TABLE IF NOT EXISTS youtube_lakehouse.control.ingestion_comments (
 ) USING DELTA;
 ```
 
+Para adicionar a telemetria das tasks em um catálogo existente, execute também
+[002_task_execution_logs.sql](migrations/002_task_execution_logs.sql) uma única
+vez antes do próximo Job. Em uma instalação nova, `00_setup.ipynb` já cria essa
+tabela.
+
 ### Evolução da modelagem silver
 
 Para um catálogo que já contenha as tabelas silver antigas, pare o Job e execute
@@ -150,6 +156,23 @@ As falhas são classificadas no código (por exemplo, `TRANSIENT_NETWORK`,
 `RATE_LIMITED`, `QUOTA_EXCEEDED` e `COMMENTS_DISABLED`) e a categoria é
 preservada na mensagem de erro registrada nas tabelas de controle.
 
+## Observabilidade operacional
+
+Os notebooks do Job emitem uma linha JSON por início, término ou falha de task.
+Todos os eventos usam `ingestion_id`, `task_key` e, quando o contexto do Job
+está disponível, `task_run_id`. O fim da task registra explicitamente
+`SUCCESS`, `PARTIAL_SUCCESS` ou `FAILED`, além de duração, totais por vídeo,
+registros retornados e custo estimado da API.
+
+Cada chamada HTTP da YouTube Data API acumula uma unidade de custo estimado e
+registra o recurso, a tentativa e eventuais retries. Isso é uma estimativa de
+consumo, não um saldo de quota: a API não disponibiliza saldo restante confiável
+por resposta. Chave de API e parâmetros secretos nunca entram nesses eventos.
+
+O resumo de cada tentativa é persistido em
+`control.task_execution_logs`. Escritas repetidas da mesma tentativa fazem
+`MERGE`; retries reais possuem outro `task_run_id` e permanecem distinguíveis.
+
 ## Estrutura do projeto
 
 ```text
@@ -168,14 +191,17 @@ preservada na mensagem de erro registrada nas tabelas de controle.
 │   │   └── 60_finalize_ingestion.ipynb     # task de consolidação
 │   └── youtube_etl_genai/
 │       ├── main.py                         # entry point da wheel e leitura do segredo
+│       ├── observability.py                # logs JSON, contexto da task e resumo operacional
 │       ├── pipeline.py                     # funções Python de cada etapa do Workflow
 │       ├── persistence.py                  # schemas, Delta MERGE e estado de controle
 │       └── youtube_client.py               # cliente reutilizável da YouTube Data API
 ├── resources/
 │   ├── youtube_operational.dashboard.yml   # recurso do dashboard no Bundle
-│   └── youtube_ingestion.job.yml           # Job serverless do Bundle
+│   ├── youtube_ingestion.job.yml            # Job serverless do Bundle
+│   └── youtube_partial_success.alert.yml    # alerta SQL de resultado parcial
 ├── migrations/
-│   └── 001_silver_modeling.sql             # evolução reversível da silver existente
+│   ├── 001_silver_modeling.sql             # evolução reversível da silver existente
+│   └── 002_task_execution_logs.sql         # telemetria para catálogos existentes
 ├── tests/
 ├── databricks.yml
 ├── pyproject.toml
@@ -271,6 +297,12 @@ Todas as tasks usam o environment version 5 (Python 3.12) e a wheel produzida
 pelo Poetry. Cada notebook chama o módulo Python correspondente, sem duplicar
 lógica de API ou persistência.
 
+O Bundle também cria o alerta SQL **YouTube ingestion partial success**. Ele é
+avaliado a cada 15 minutos e notifica a pessoa que executou o deploy quando uma
+execução encerrada nos últimos 15 minutos tem `PARTIAL_SUCCESS`. Ajuste a
+assinatura do alerta para o grupo responsável antes de promover o Bundle a
+produção.
+
 Em serverless, a wheel lê a chave com `DBUtils.secrets.get` usando os parâmetros
 `secret_scope` e `secret_key`. Em um cluster clássico, o entry point também
 aceita a variável de ambiente `YOUTUBE_API_KEY` como alternativa de execução.
@@ -313,8 +345,8 @@ As séries temporais usam somente o último snapshot de cada entidade em cada
 dia, evitando somar múltiplas coletas do mesmo vídeo ou canal.
 
 O dashboard usa quatro views de apresentação no schema `silver`:
-`dashboard_ingestion_runs`, `dashboard_video_targets`,
-`dashboard_video_metrics` e `dashboard_channel_metrics`. Elas são criadas pelo
+`vw_dashboard_ingestion_runs`, `vw_dashboard_video_targets`,
+`vw_dashboard_video_metrics` e `vw_dashboard_channel_metrics`. Elas são criadas pelo
 notebook `00_setup.ipynb`; execute novamente apenas a célula das tabelas
 `silver` ao atualizar um ambiente já existente.
 
@@ -368,6 +400,29 @@ WHERE video_id = 'dNJbFHRuHRk'
 ORDER BY collected_at;
 ```
 
+Confira as últimas tentativas de task e identifique resultados parciais:
+
+```sql
+SELECT
+  ingestion_id,
+  task_key,
+  task_run_id,
+  status,
+  duration_seconds,
+  videos_attempted,
+  videos_failed,
+  records_fetched,
+  api_cost_units,
+  error_message
+FROM (
+  SELECT
+    *,
+    unix_timestamp(ended_at) - unix_timestamp(started_at) AS duration_seconds
+  FROM youtube_lakehouse.control.task_execution_logs
+)
+ORDER BY ended_at DESC;
+```
+
 ## Desenvolvimento local
 
 O projeto usa Poetry e um ambiente virtual dentro do repositório:
@@ -401,7 +456,7 @@ python -m json.tool src/notebooks/10_claim_targets.ipynb >/dev/null
 
 - Marcar de forma segura comentários e replies que deixam de aparecer em uma
   varredura completa, sem apagar histórico.
-- Adicionar observabilidade operacional, métricas de qualidade e alertas.
+- Adicionar métricas de qualidade e alertas de taxa de erro ou duração anômala.
 - Criar modelos `gold` para crescimento, engajamento e comparação entre vídeos
   e canais.
 - Não implementar a coleta de transcrições de canais de terceiros, para respeitar

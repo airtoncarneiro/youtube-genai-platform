@@ -119,11 +119,13 @@ def test_wraps_http_error_with_response_details() -> None:
 
 def test_retries_transient_timeout_with_exponential_backoff() -> None:
     delays: list[float] = []
+    cost_events: list[int] = []
     client = YouTubeClient(
         api_key="test-key",
         max_attempts=3,
         backoff_seconds=0.25,
         sleep=delays.append,
+        api_cost_observer=cost_events.append,
     )
     response = Mock()
     response.json.return_value = {"items": [{"id": "channel-id"}]}
@@ -134,6 +136,8 @@ def test_retries_transient_timeout_with_exponential_backoff() -> None:
     assert client.get_channel_by_handle("@example") == {"id": "channel-id"}
     assert delays == [0.25, 0.5]
     assert client.session.get.call_count == 3
+    assert client.api_cost_units == 3
+    assert cost_events == [1, 1, 1]
 
 
 def test_retries_rate_limit_but_not_quota_exhaustion() -> None:

@@ -187,6 +187,78 @@ def append_raw(
     )
 
 
+def merge_task_execution_log(
+    spark: Any,
+    catalog: str,
+    *,
+    ingestion_id: str | None,
+    task_key: str,
+    task_run_id: str | None,
+    started_at: datetime,
+    ended_at: datetime,
+    status: str,
+    videos_attempted: int,
+    videos_succeeded: int,
+    videos_failed: int,
+    records_fetched: int,
+    api_cost_units: int,
+    error_message: str | None,
+) -> None:
+    """Upsert the operational summary for a Databricks task attempt.
+
+    ``task_run_id`` is unique for a Job attempt. A retry therefore keeps its
+    own record, while repeating the final write for the same attempt is
+    idempotent. Interactive runs have no task-run id and use task plus
+    ingestion as their best available key.
+    """
+    view_name = f"task_execution_log_{uuid4().hex}"
+    spark.createDataFrame(
+        [
+            (
+                ingestion_id,
+                task_key,
+                task_run_id,
+                started_at,
+                ended_at,
+                status,
+                videos_attempted,
+                videos_succeeded,
+                videos_failed,
+                records_fetched,
+                api_cost_units,
+                error_message,
+            )
+        ],
+        "ingestion_id string, task_key string, task_run_id string, "
+        "started_at timestamp, ended_at timestamp, status string, "
+        "videos_attempted bigint, videos_succeeded bigint, videos_failed bigint, "
+        "records_fetched bigint, api_cost_units bigint, error_message string",
+    ).createOrReplaceTempView(view_name)
+    try:
+        spark.sql(
+            f"""
+        MERGE INTO {catalog}.control.task_execution_logs AS target
+        USING {view_name} AS source
+        ON target.task_key = source.task_key
+          AND COALESCE(target.task_run_id, '') = COALESCE(source.task_run_id, '')
+          AND COALESCE(target.ingestion_id, '') = COALESCE(source.ingestion_id, '')
+        WHEN MATCHED THEN UPDATE SET
+          target.started_at = source.started_at,
+          target.ended_at = source.ended_at,
+          target.status = source.status,
+          target.videos_attempted = source.videos_attempted,
+          target.videos_succeeded = source.videos_succeeded,
+          target.videos_failed = source.videos_failed,
+          target.records_fetched = source.records_fetched,
+          target.api_cost_units = source.api_cost_units,
+          target.error_message = source.error_message
+        WHEN NOT MATCHED THEN INSERT *
+        """
+        )
+    finally:
+        spark.catalog.dropTempView(view_name)
+
+
 def merge_silver(
     spark: Any,
     catalog: str,

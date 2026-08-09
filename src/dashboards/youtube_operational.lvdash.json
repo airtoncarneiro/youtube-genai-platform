@@ -5,7 +5,7 @@
       "displayName": "Vídeos monitorados",
       "queryLines": [
         "SELECT video_id, is_active, priority, refresh_interval_hours, status, last_succeeded_at, next_refresh_at, attempt_count, error_message \n",
-        "FROM dashboard_video_targets"
+        "FROM vw_dashboard_video_targets"
       ],
       "columns": [
         {
@@ -29,8 +29,8 @@
       "name": "ds_runs",
       "displayName": "Execuções de ingestão",
       "queryLines": [
-        "SELECT ingestion_id, channel_name, started_at, ended_at, status, error_message, duration_seconds \n",
-        "FROM dashboard_ingestion_runs \n",
+        "SELECT ingestion_id, channel_name, started_at, ended_at, status, COALESCE(error_message, '-') AS error_message, duration_seconds \n",
+        "FROM vw_dashboard_ingestion_runs \n",
         "WHERE started_at >= CURRENT_TIMESTAMP() - INTERVAL 30 DAYS \n",
         "ORDER BY started_at DESC \n",
         "LIMIT 500"
@@ -43,11 +43,11 @@
         "WITH dates AS (\n",
         "  SELECT EXPLODE(SEQUENCE(CURRENT_DATE() - INTERVAL 89 DAYS, CURRENT_DATE(), INTERVAL 1 DAY)) AS collected_date\n",
         "), active_videos AS (\n",
-        "  SELECT DISTINCT video_id FROM dashboard_video_targets WHERE is_active\n",
+        "  SELECT DISTINCT video_id FROM vw_dashboard_video_targets WHERE is_active\n",
         ")\n",
         "SELECT active.video_id, MAX_BY(metrics.video_title, metrics.collected_at) AS video_title, MAX_BY(metrics.channel_title, metrics.collected_at) AS channel_title, dates.collected_date, MAX_BY(metrics.view_count, metrics.collected_at) AS view_count, MAX_BY(metrics.like_count, metrics.collected_at) AS like_count, MAX_BY(metrics.comment_count, metrics.collected_at) AS comment_count \n",
         "FROM dates CROSS JOIN active_videos AS active \n",
-        "LEFT JOIN dashboard_video_metrics AS metrics ON metrics.video_id = active.video_id AND metrics.collected_at < dates.collected_date + INTERVAL 1 DAY \n",
+        "LEFT JOIN vw_dashboard_video_metrics AS metrics ON metrics.video_id = active.video_id AND metrics.collected_at < dates.collected_date + INTERVAL 1 DAY \n",
         "GROUP BY active.video_id, dates.collected_date \n",
         "HAVING view_count IS NOT NULL \n",
         "ORDER BY collected_date"
@@ -60,11 +60,11 @@
         "WITH dates AS (\n",
         "  SELECT EXPLODE(SEQUENCE(CURRENT_DATE() - INTERVAL 89 DAYS, CURRENT_DATE(), INTERVAL 1 DAY)) AS collected_date\n",
         "), active_channels AS (\n",
-        "  SELECT DISTINCT metrics.channel_id FROM dashboard_video_metrics AS metrics INNER JOIN dashboard_video_targets AS targets ON metrics.video_id = targets.video_id WHERE targets.is_active\n",
+        "  SELECT DISTINCT metrics.channel_id FROM vw_dashboard_video_metrics AS metrics INNER JOIN vw_dashboard_video_targets AS targets ON metrics.video_id = targets.video_id WHERE targets.is_active\n",
         ")\n",
         "SELECT active.channel_id, MAX_BY(metrics.channel_title, metrics.collected_at) AS channel_title, dates.collected_date, MAX_BY(metrics.subscriber_count, metrics.collected_at) AS subscriber_count, MAX_BY(metrics.video_count, metrics.collected_at) AS video_count \n",
         "FROM dates CROSS JOIN active_channels AS active \n",
-        "LEFT JOIN dashboard_channel_metrics AS metrics ON metrics.channel_id = active.channel_id AND metrics.collected_at < dates.collected_date + INTERVAL 1 DAY \n",
+        "LEFT JOIN vw_dashboard_channel_metrics AS metrics ON metrics.channel_id = active.channel_id AND metrics.collected_at < dates.collected_date + INTERVAL 1 DAY \n",
         "GROUP BY active.channel_id, dates.collected_date \n",
         "HAVING subscriber_count IS NOT NULL \n",
         "ORDER BY collected_date"
@@ -77,8 +77,8 @@
         "WITH ranked_snapshots AS (\n",
         "  SELECT metrics.video_id AS video_id, metrics.video_title AS video_title, metrics.channel_title AS channel_title, metrics.collected_at AS collected_at, metrics.view_count AS view_count, metrics.like_count AS like_count, metrics.comment_count AS comment_count,\n",
         "         ROW_NUMBER() OVER (PARTITION BY metrics.video_id ORDER BY metrics.collected_at DESC) AS row_num\n",
-        "  FROM dashboard_video_metrics AS metrics\n",
-        "  INNER JOIN dashboard_video_targets AS targets ON metrics.video_id = targets.video_id\n",
+        "  FROM vw_dashboard_video_metrics AS metrics\n",
+        "  INNER JOIN vw_dashboard_video_targets AS targets ON metrics.video_id = targets.video_id\n",
         "  WHERE targets.is_active\n",
         ")\n",
         "SELECT video_id, video_title, channel_title, collected_at, view_count, like_count, comment_count \n",
@@ -134,16 +134,16 @@
         {
           "widget": {
             "name": "video-views-trend",
-            "queries": [{"name": "main_query", "query": {"datasetName": "ds_video_trend", "fields": [{"name": "collected_date", "expression": "`collected_date`"}, {"name": "sum(view_count)", "expression": "SUM(`view_count`)"}], "disaggregated": false}}],
-            "spec": {"version": 3, "widgetType": "line", "encodings": {"x": {"fieldName": "collected_date", "scale": {"type": "temporal"}, "displayName": "Data"}, "y": {"fieldName": "sum(view_count)", "scale": {"type": "quantitative", "domainMin": 0}, "displayName": "Views"}}, "frame": {"showTitle": true, "title": "Views totais dos vídeos monitorados"}}
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_video_trend", "fields": [{"name": "collected_date", "expression": "`collected_date`"}, {"name": "channel_title", "expression": "`channel_title`"}, {"name": "sum(view_count)", "expression": "SUM(`view_count`)"}], "disaggregated": false}}],
+            "spec": {"version": 3, "widgetType": "line", "encodings": {"x": {"fieldName": "collected_date", "scale": {"type": "temporal"}, "displayName": "Data"}, "y": {"fieldName": "sum(view_count)", "scale": {"type": "quantitative", "domainMin": 0}, "displayName": "Views"}, "color": {"fieldName": "channel_title", "displayName": "Canal", "scale": {"type": "categorical"}}}, "frame": {"showTitle": true, "title": "Evolução diária de views por canal", "showDescription": true, "description": "Até 90 dias; usa o último snapshot disponível de cada vídeo em cada dia."}}
           },
           "position": {"x": 0, "y": 5, "width": 6, "height": 5}
         },
         {
           "widget": {
             "name": "channel-subscribers-trend",
-            "queries": [{"name": "main_query", "query": {"datasetName": "ds_channel_trend", "fields": [{"name": "collected_date", "expression": "`collected_date`"}, {"name": "sum(subscriber_count)", "expression": "SUM(`subscriber_count`)"}], "disaggregated": false}}],
-            "spec": {"version": 3, "widgetType": "line", "encodings": {"x": {"fieldName": "collected_date", "scale": {"type": "temporal"}, "displayName": "Data"}, "y": {"fieldName": "sum(subscriber_count)", "scale": {"type": "quantitative", "domainMin": 0}, "displayName": "Inscritos"}}, "frame": {"showTitle": true, "title": "Inscritos totais dos canais"}}
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_channel_trend", "fields": [{"name": "collected_date", "expression": "`collected_date`"}, {"name": "channel_title", "expression": "`channel_title`"}, {"name": "sum(subscriber_count)", "expression": "SUM(`subscriber_count`)"}], "disaggregated": false}}],
+            "spec": {"version": 3, "widgetType": "line", "encodings": {"x": {"fieldName": "collected_date", "scale": {"type": "temporal"}, "displayName": "Data"}, "y": {"fieldName": "sum(subscriber_count)", "scale": {"type": "quantitative", "domainMin": 0}, "displayName": "Inscritos"}, "color": {"fieldName": "channel_title", "displayName": "Canal", "scale": {"type": "categorical"}}}, "frame": {"showTitle": true, "title": "Evolução diária de inscritos por canal", "showDescription": true, "description": "Até 90 dias; usa o último snapshot disponível de cada canal em cada dia."}}
           },
           "position": {"x": 6, "y": 5, "width": 6, "height": 5}
         },
@@ -175,6 +175,7 @@
       "selectionColor": {"light": "#2272B4", "dark": "#8ACAFF"},
       "visualizationColors": ["#094074", "#3C6997", "#5ADBFF", "#FFDD4A", "#FE9000"],
       "widgetHeaderAlignment": "LEFT"
-    }
+    },
+    "applyModeEnabled": false
   }
 }

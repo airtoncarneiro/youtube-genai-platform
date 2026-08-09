@@ -36,6 +36,7 @@ resources:
             base_parameters:
               batch_size: "{{job.parameters.batch_size}}"
               catalog: "{{job.parameters.catalog}}"
+              task_run_id: "{{task.run_id}}"
 
         - task_key: fetch_videos
           description: Atualiza os dados atuais e os snapshots de métricas dos vídeos reservados.
@@ -51,6 +52,7 @@ resources:
             base_parameters:
               ingestion_id: "{{tasks.claim_targets.values.ingestion_id}}"
               catalog: "{{job.parameters.catalog}}"
+              task_run_id: "{{task.run_id}}"
               secret_scope: "{{job.parameters.secret_scope}}"
               secret_key: "{{job.parameters.secret_key}}"
 
@@ -68,6 +70,7 @@ resources:
             base_parameters:
               ingestion_id: "{{tasks.claim_targets.values.ingestion_id}}"
               catalog: "{{job.parameters.catalog}}"
+              task_run_id: "{{task.run_id}}"
               secret_scope: "{{job.parameters.secret_scope}}"
               secret_key: "{{job.parameters.secret_key}}"
 
@@ -86,6 +89,7 @@ resources:
               ingestion_id: "{{tasks.claim_targets.values.ingestion_id}}"
               max_comments_per_video: "{{job.parameters.max_comments_per_video}}"
               catalog: "{{job.parameters.catalog}}"
+              task_run_id: "{{task.run_id}}"
               secret_scope: "{{job.parameters.secret_scope}}"
               secret_key: "{{job.parameters.secret_key}}"
 
@@ -104,6 +108,7 @@ resources:
               ingestion_id: "{{tasks.claim_targets.values.ingestion_id}}"
               max_replies_per_comment: "{{job.parameters.max_replies_per_comment}}"
               catalog: "{{job.parameters.catalog}}"
+              task_run_id: "{{task.run_id}}"
               secret_scope: "{{job.parameters.secret_scope}}"
               secret_key: "{{job.parameters.secret_key}}"
 
@@ -123,6 +128,7 @@ resources:
             base_parameters:
               ingestion_id: "{{tasks.claim_targets.values.ingestion_id}}"
               catalog: "{{job.parameters.catalog}}"
+              task_run_id: "{{task.run_id}}"
 
       environments:
         - environment_key: default

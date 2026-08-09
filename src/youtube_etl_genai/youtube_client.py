@@ -3,11 +3,17 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta
 from enum import StrEnum
+import logging
 import re
 import time
 from typing import Any
 
 import requests
+
+from youtube_etl_genai.observability import log_event
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class YouTubeAPIErrorCategory(StrEnum):
@@ -44,9 +50,16 @@ class YouTubeAPIError(RuntimeError):
 _TRANSIENT_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 _RATE_LIMIT_REASONS = frozenset({"rateLimitExceeded", "userRateLimitExceeded"})
 _QUOTA_REASONS = frozenset({"dailyLimitExceeded", "quotaExceeded"})
+_API_COST_UNITS = {
+    "videos": 1,
+    "channels": 1,
+    "commentThreads": 1,
+    "comments": 1,
+}
 
 
 ResponseObserver = Callable[[str, dict[str, Any], dict[str, Any]], None]
+ApiCostObserver = Callable[[int], None]
 
 _YOUTUBE_DURATION = re.compile(
     r"^P(?:(?P<days>\d+(?:\.\d+)?)D)?(?:T(?:(?P<hours>\d+(?:\.\d+)?)H)?"
@@ -93,6 +106,8 @@ class YouTubeClient:
         api_key: str,
         timeout: int = 30,
         response_observer: ResponseObserver | None = None,
+        ingestion_id: str | None = None,
+        api_cost_observer: ApiCostObserver | None = None,
         max_attempts: int = 3,
         backoff_seconds: float = 1.0,
         sleep: Callable[[float], None] = time.sleep,
@@ -108,10 +123,13 @@ class YouTubeClient:
         self.api_key = api_key
         self.timeout = timeout
         self.response_observer = response_observer
+        self.ingestion_id = ingestion_id
+        self.api_cost_observer = api_cost_observer
         self.max_attempts = max_attempts
         self.backoff_seconds = backoff_seconds
         self.sleep = sleep
         self.session = requests.Session()
+        self.api_cost_units = 0
 
     @staticmethod
     def _api_error_from_response(response: requests.Response) -> YouTubeAPIError:
@@ -176,10 +194,22 @@ class YouTubeClient:
             **params,
             "key": self.api_key,
         }
+        cost_units = _API_COST_UNITS.get(resource, 1)
 
         for attempt in range(1, self.max_attempts + 1):
             cause: Exception | None = None
             try:
+                self.api_cost_units += cost_units
+                if self.api_cost_observer:
+                    self.api_cost_observer(cost_units)
+                log_event(
+                    LOGGER,
+                    "api_call",
+                    ingestion_id=self.ingestion_id,
+                    resource=resource,
+                    attempt=attempt,
+                    cost_units=cost_units,
+                )
                 response = self.session.get(
                     url,
                     params=request_params,
@@ -208,8 +238,32 @@ class YouTubeClient:
                 return response_data
 
             if not error.retryable or attempt == self.max_attempts:
+                if error.category in {
+                    YouTubeAPIErrorCategory.QUOTA_EXCEEDED,
+                    YouTubeAPIErrorCategory.RATE_LIMITED,
+                }:
+                    log_event(
+                        LOGGER,
+                        "api_limit_reached",
+                        level=logging.WARNING,
+                        ingestion_id=self.ingestion_id,
+                        resource=resource,
+                        category=error.category,
+                        status_code=error.status_code,
+                    )
                 raise error from cause
-            self.sleep(self._retry_delay(attempt))
+            delay_seconds = self._retry_delay(attempt)
+            log_event(
+                LOGGER,
+                "api_retry",
+                level=logging.WARNING,
+                ingestion_id=self.ingestion_id,
+                resource=resource,
+                attempt=attempt,
+                delay_seconds=delay_seconds,
+                category=error.category,
+            )
+            self.sleep(delay_seconds)
 
         raise AssertionError("Tentativas esgotadas sem retornar ou lançar um erro")
 

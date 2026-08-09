@@ -94,7 +94,7 @@ def test_failed_counter_only_counts_active_targets() -> None:
 def test_latest_video_metrics_only_include_active_targets() -> None:
     query = _queries_by_dataset()["ds_latest_videos"]
 
-    assert "INNER JOIN dashboard_video_targets" in query
+    assert "INNER JOIN vw_dashboard_video_targets" in query
     assert "WHERE targets.is_active" in query
     assert "SELECT metrics.video_id AS video_id" in query
     assert "PARTITION BY metrics.video_id" in query
@@ -106,8 +106,8 @@ def test_dashboard_resource_matches_the_setup_catalog_and_schema() -> None:
 
     assert "dataset_catalog: youtube_lakehouse" in resource
     assert "dataset_schema: silver" in resource
-    assert "youtube_lakehouse.silver.dashboard_video_metrics" in setup
-    assert "youtube_lakehouse.silver.dashboard_channel_metrics" in setup
+    assert "youtube_lakehouse.silver.vw_dashboard_video_metrics" in setup
+    assert "youtube_lakehouse.silver.vw_dashboard_channel_metrics" in setup
 
 
 def test_every_physical_table_column_has_a_comment_in_the_setup_notebook() -> None:
@@ -131,7 +131,7 @@ def test_dashboard_ingestion_duration_has_a_comment_in_the_setup_notebook() -> N
 
     assert (
         "COMMENT ON COLUMN "
-        "youtube_lakehouse.silver.dashboard_ingestion_runs.duration_seconds "
+        "youtube_lakehouse.silver.vw_dashboard_ingestion_runs.duration_seconds "
         "IS 'Duração da execução em segundos, calculada como diferença entre "
         "ended_at e started_at'"
     ) in setup

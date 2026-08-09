@@ -1,0 +1,373 @@
+{
+  "datasets": [
+    {
+      "name": "ds_task_executions",
+      "displayName": "Execuções das tarefas",
+      "queryLines": [
+        "SELECT ingestion_id, task_key, task_run_id, started_at, ended_at, status, videos_attempted, videos_succeeded, videos_failed, records_fetched, api_cost_units, error_message, ",
+        "ROUND(timestampdiff(SECOND, started_at, ended_at) / 60.0, 2) AS duration_minutes ",
+        "FROM task_execution_logs ",
+        "WHERE started_at >= current_timestamp() - INTERVAL 30 DAYS"
+      ],
+      "columns": [
+        {
+          "displayName": "Tentativas",
+          "description": "Total de tentativas de tarefas no período filtrado",
+          "expression": "COUNT(*)"
+        },
+        {
+          "displayName": "Taxa de sucesso",
+          "description": "Proporção de tarefas concluídas com sucesso",
+          "expression": "AVG(CASE WHEN `status` = 'SUCCESS' THEN 1.0 ELSE 0.0 END)"
+        },
+        {
+          "displayName": "Duração média (min)",
+          "description": "Média da duração das tarefas em minutos",
+          "expression": "AVG(`duration_minutes`)"
+        },
+        {
+          "displayName": "Custo estimado da API",
+          "description": "Unidades estimadas da YouTube Data API consumidas",
+          "expression": "SUM(`api_cost_units`)"
+        }
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "overview",
+      "displayName": "Visão geral",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "dashboard-title",
+            "multilineTextboxSpec": {
+              "lines": ["# Saúde da ingestão do YouTube"]
+            }
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "dashboard-description",
+            "multilineTextboxSpec": {
+              "lines": ["Acompanhe duração, resultado e custo estimado por tarefa. Use os filtros para investigar uma execução específica."]
+            }
+          },
+          "position": {"x": 0, "y": 1, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "kpi-task-attempts",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "ds_task_executions",
+                "fields": [{"name": "measure(Tentativas)", "expression": "MEASURE(`Tentativas`)"}],
+                "disaggregated": false
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {"value": {"fieldName": "measure(Tentativas)", "displayName": "Tentativas"}},
+              "frame": {"showTitle": true, "title": "Tentativas de tarefas"}
+            }
+          },
+          "position": {"x": 0, "y": 3, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi-success-rate",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "ds_task_executions",
+                "fields": [{"name": "measure(Taxa de sucesso)", "expression": "MEASURE(`Taxa de sucesso`)"}],
+                "disaggregated": false
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(Taxa de sucesso)",
+                  "displayName": "Sucesso",
+                  "format": {"type": "number-percent", "decimalPlaces": {"type": "max", "places": 1}}
+                }
+              },
+              "frame": {"showTitle": true, "title": "Taxa de sucesso"}
+            }
+          },
+          "position": {"x": 3, "y": 3, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi-average-duration",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "ds_task_executions",
+                "fields": [{"name": "measure(Duração média (min))", "expression": "MEASURE(`Duração média (min)`)"}],
+                "disaggregated": false
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(Duração média (min))",
+                  "displayName": "Minutos",
+                  "formatTemplate": "{{ @formatted }} min"
+                }
+              },
+              "frame": {"showTitle": true, "title": "Duração média"}
+            }
+          },
+          "position": {"x": 6, "y": 3, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi-api-cost",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "ds_task_executions",
+                "fields": [{"name": "measure(Custo estimado da API)", "expression": "MEASURE(`Custo estimado da API`)"}],
+                "disaggregated": false
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {"value": {"fieldName": "measure(Custo estimado da API)", "displayName": "Unidades"}},
+              "frame": {"showTitle": true, "title": "Custo estimado da API"}
+            }
+          },
+          "position": {"x": 9, "y": 3, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "task-volume-trend",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "ds_task_executions",
+                "fields": [
+                  {"name": "daily(started_at)", "expression": "DATE_TRUNC(\"DAY\", `started_at`)"},
+                  {"name": "count(*)", "expression": "COUNT(`*`)"}
+                ],
+                "disaggregated": false,
+                "orders": [{"direction": "ASC", "expression": "DATE_TRUNC(\"DAY\", `started_at`)"}]
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {"fieldName": "daily(started_at)", "scale": {"type": "temporal"}},
+                "y": {"fieldName": "count(*)", "displayName": "Tentativas", "scale": {"type": "quantitative", "domainMin": 0}}
+              },
+              "frame": {"showTitle": true, "title": "Tentativas por dia"}
+            }
+          },
+          "position": {"x": 0, "y": 7, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "status-by-task",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "ds_task_executions",
+                "fields": [
+                  {"name": "task_key", "expression": "`task_key`"},
+                  {"name": "status", "expression": "`status`"},
+                  {"name": "count(*)", "expression": "COUNT(`*`)"}
+                ],
+                "disaggregated": false
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "task_key", "scale": {"type": "categorical"}},
+                "y": {"fieldName": "count(*)", "displayName": "Tentativas", "scale": {"type": "quantitative", "domainMin": 0}},
+                "color": {
+                  "fieldName": "status",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {"value": "SUCCESS", "color": "#21918C"},
+                      {"value": "PARTIAL_SUCCESS", "color": "#F89441"},
+                      {"value": "FAILED", "color": "#FF7E5C"}
+                    ]
+                  }
+                }
+              },
+              "frame": {"showTitle": true, "title": "Status por tarefa"}
+            }
+          },
+          "position": {"x": 6, "y": 7, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "duration-by-task",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "ds_task_executions",
+                "fields": [
+                  {"name": "task_key", "expression": "`task_key`"},
+                  {"name": "avg(duration_minutes)", "expression": "AVG(`duration_minutes`)"}
+                ],
+                "disaggregated": false,
+                "orders": [{"direction": "DESC", "expression": "AVG(`duration_minutes`)"}]
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "avg(duration_minutes)", "displayName": "Minutos", "scale": {"type": "quantitative", "domainMin": 0}},
+                "y": {"fieldName": "task_key", "scale": {"type": "categorical"}}
+              },
+              "frame": {"showTitle": true, "title": "Duração média por tarefa"}
+            }
+          },
+          "position": {"x": 0, "y": 13, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "api-cost-by-task",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "ds_task_executions",
+                "fields": [
+                  {"name": "task_key", "expression": "`task_key`"},
+                  {"name": "sum(api_cost_units)", "expression": "SUM(`api_cost_units`)"}
+                ],
+                "disaggregated": false,
+                "orders": [{"direction": "DESC", "expression": "SUM(`api_cost_units`)"}]
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "sum(api_cost_units)", "displayName": "Unidades", "scale": {"type": "quantitative", "domainMin": 0}},
+                "y": {"fieldName": "task_key", "scale": {"type": "categorical"}}
+              },
+              "frame": {"showTitle": true, "title": "Custo estimado por tarefa"}
+            }
+          },
+          "position": {"x": 6, "y": 13, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "task-execution-details",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "ds_task_executions",
+                "fields": [
+                  {"name": "ingestion_id", "expression": "`ingestion_id`"},
+                  {"name": "task_key", "expression": "`task_key`"},
+                  {"name": "started_at", "expression": "`started_at`"},
+                  {"name": "status", "expression": "`status`"},
+                  {"name": "duration_minutes", "expression": "`duration_minutes`"},
+                  {"name": "api_cost_units", "expression": "`api_cost_units`"},
+                  {"name": "error_message", "expression": "`error_message`"}
+                ],
+                "disaggregated": true,
+                "orders": [{"direction": "DESC", "expression": "`started_at`"}]
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "ingestion_id", "displayName": "Ingestion ID"},
+                  {"fieldName": "task_key", "displayName": "Tarefa"},
+                  {"fieldName": "started_at", "displayName": "Início"},
+                  {"fieldName": "status", "displayName": "Status"},
+                  {"fieldName": "duration_minutes", "displayName": "Duração (min)", "format": {"type": "number", "decimalPlaces": {"type": "exact", "places": 2}}},
+                  {"fieldName": "api_cost_units", "displayName": "Custo API"},
+                  {"fieldName": "error_message", "displayName": "Erro"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Detalhe das tarefas"}
+            }
+          },
+          "position": {"x": 0, "y": 19, "width": 12, "height": 7}
+        }
+      ]
+    },
+    {
+      "name": "filters",
+      "displayName": "Filtros",
+      "pageType": "PAGE_TYPE_GLOBAL_FILTERS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "filter-started-at",
+            "queries": [{"name": "filter_started_at", "query": {"datasetName": "ds_task_executions", "fields": [{"name": "started_at", "expression": "`started_at`"}], "disaggregated": false}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "encodings": {"fields": [{"fieldName": "started_at", "queryName": "filter_started_at"}]},
+              "frame": {"showTitle": true, "title": "Período"}
+            }
+          },
+          "position": {"x": 0, "y": 0, "width": 4, "height": 2}
+        },
+        {
+          "widget": {
+            "name": "filter-task-key",
+            "queries": [{"name": "filter_task_key", "query": {"datasetName": "ds_task_executions", "fields": [{"name": "task_key", "expression": "`task_key`"}], "disaggregated": false}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {"fields": [{"fieldName": "task_key", "displayName": "Tarefa", "queryName": "filter_task_key"}]},
+              "frame": {"showTitle": true, "title": "Tarefas"}
+            }
+          },
+          "position": {"x": 4, "y": 0, "width": 4, "height": 2}
+        },
+        {
+          "widget": {
+            "name": "filter-status",
+            "queries": [{"name": "filter_status", "query": {"datasetName": "ds_task_executions", "fields": [{"name": "status", "expression": "`status`"}], "disaggregated": false}}],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {"fields": [{"fieldName": "status", "displayName": "Status", "queryName": "filter_status"}]},
+              "frame": {"showTitle": true, "title": "Status"}
+            }
+          },
+          "position": {"x": 8, "y": 0, "width": 4, "height": 2}
+        }
+      ]
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "canvasBackgroundColor": {"light": "#FCFCFC", "dark": "#1F272D"},
+      "widgetBackgroundColor": {"light": "#FFFFFF", "dark": "#11171C"},
+      "widgetBorderColor": {"light": "#FFFFFF", "dark": "#11171C"},
+      "fontColor": {"light": "#11171C", "dark": "#E8ECF0"},
+      "selectionColor": {"light": "#2272B4", "dark": "#8ACAFF"},
+      "visualizationColors": ["#094074", "#3C6997", "#21918C", "#F89441", "#FF7E5C"],
+      "widgetHeaderAlignment": "LEFT"
+    },
+    "applyModeEnabled": false
+  }
+}
