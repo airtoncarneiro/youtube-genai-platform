@@ -5,6 +5,35 @@ O pipeline consulta uma lista controlada de vídeos, atualiza os dados mais
 recentes e registra a evolução das métricas de vídeos e canais ao longo do
 tempo.
 
+## Visão geral
+
+O projeto é um **Declarative Automation Bundle (DAB)** do Databricks que
+implementa uma arquitetura lakehouse para ingestão, acompanhamento operacional
+e análise de métricas públicas do YouTube. Ele combina um Job serverless
+orquestrado, tabelas Delta no Unity Catalog, rastreabilidade de execuções,
+alertas SQL e dashboards versionados no próprio Bundle.
+
+No target `dev`, o catálogo é `youtube_lakehouse`; outros targets podem
+substituir esse valor pela variável `catalog` do Bundle.
+
+## Índice
+
+- [O que o projeto faz hoje](#o-que-o-projeto-faz-hoje)
+- [Arquitetura do Workflow](#arquitetura-do-workflow)
+- [Camadas implementadas](#camadas-implementadas)
+- [Persistência e comportamento incremental](#persistência-e-comportamento-incremental)
+- [Resiliência da API](#resiliência-da-api)
+- [Observabilidade operacional](#observabilidade-operacional)
+- [Estrutura do projeto](#estrutura-do-projeto)
+- [Pré-requisitos](#pré-requisitos)
+- [Preparar o Lakehouse e cadastrar vídeos](#preparar-o-lakehouse-e-cadastrar-vídeos)
+- [Databricks Asset Bundle e execução](#databricks-asset-bundle-e-execução)
+- [Dashboards e monitoramento](#dashboards-e-monitoramento)
+- [Consultas de verificação](#consultas-de-verificação)
+- [Troubleshooting](#troubleshooting)
+- [Desenvolvimento local](#desenvolvimento-local)
+- [Próximas evoluções](#próximas-evoluções)
+
 ## O que o projeto faz hoje
 
 Para cada vídeo elegível em uma tabela de controle, o Job:
@@ -43,9 +72,6 @@ Cada fetch grava seus payloads em raw.api_responses e seus dados em silver.
 control.ingestion_step_outcomes é o handoff durável entre as tasks.
 ```
 
-No target `dev`, o catálogo usado pelo projeto é `youtube_lakehouse`. O valor
-fica na variável `catalog` do Bundle e pode ser substituído por target.
-
 ## Camadas implementadas
 
 | Camada | Tabelas | Finalidade |
@@ -66,6 +92,10 @@ fica na variável `catalog` do Bundle e pode ser substituído por target.
 Exemplo: `silver.videos.view_count` responde quantas visualizações um vídeo
 tem agora; `silver.video_snapshots` permite calcular quanto ele cresceu entre
 duas coletas.
+
+Todas essas tabelas Delta têm Change Data Feed habilitado. As chaves primárias
+e estrangeiras declaradas no Unity Catalog documentam relações de negócio e
+são `NOT ENFORCED`; a integridade operacional é preservada pelo pipeline.
 
 ## Persistência e comportamento incremental
 
@@ -90,9 +120,10 @@ duas coletas.
   fetch de replies termina ou é definitivamente interrompido. Ela não é uma
   tabela histórica.
 
-Por padrão, os limites de comentários e replies são `0`, que significa
-paginação completa. Um valor positivo limita deliberadamente a coleta e é
-adequado apenas para desenvolvimento ou recuperação controlada.
+No target `dev`, os limites padrão são 20 comentários por vídeo e 5 replies por
+comentário. O valor `0` habilita paginação completa; um limite positivo reduz
+deliberadamente a coleta e é adequado para desenvolvimento ou recuperação
+controlada.
 
 ### Atualização de schema para ambientes existentes
 
@@ -179,7 +210,8 @@ O resumo de cada tentativa é persistido em
 .
 ├── src/
 │   ├── dashboards/
-│   │   └── youtube_operational.lvdash.json # dashboard de operação e evolução
+│   │   ├── youtube_operational.lvdash.json # dashboard de operação e evolução
+│   │   └── youtube_task_execution.lvdash.json # dashboard de saúde da ingestão
 │   ├── notebooks/
 │   │   ├── 00_setup.ipynb                  # cria catálogo, schemas e tabelas
 │   │   ├── 01_youtube_ingestion_test.ipynb # consulta as tabelas do lakehouse
@@ -197,11 +229,13 @@ O resumo de cada tentativa é persistido em
 │       └── youtube_client.py               # cliente reutilizável da YouTube Data API
 ├── resources/
 │   ├── youtube_operational.dashboard.yml   # recurso do dashboard no Bundle
+│   ├── youtube_task_execution.dashboard.yml # recurso do dashboard de saúde
 │   ├── youtube_ingestion.job.yml            # Job serverless do Bundle
 │   └── youtube_partial_success.alert.yml    # alerta SQL de resultado parcial
 ├── migrations/
 │   ├── 001_silver_modeling.sql             # evolução reversível da silver existente
-│   └── 002_task_execution_logs.sql         # telemetria para catálogos existentes
+│   ├── 002_task_execution_logs.sql         # telemetria para catálogos existentes
+│   └── 003_rename_dashboard_views.sql       # renomeia as views de apresentação
 ├── tests/
 ├── databricks.yml
 ├── pyproject.toml
@@ -286,12 +320,14 @@ O Bundle cria o Job `youtube_ingestion` com seis tasks serverless:
 podem rodar em paralelo; replies depende de comentários. A finalização usa
 `ALL_DONE` para registrar corretamente falhas de qualquer ramo.
 
-O Job aceita uma execução por vez e mantém execuções adicionais em fila. As
-tasks de fetch têm duas novas tentativas, com intervalo mínimo de 30 segundos;
-as tasks de controle têm uma. Há timeout de duas horas para o Job, uma hora
-para fetches e quinze minutos para controle/finalização. As operações Delta
-são idempotentes para o mesmo `ingestion_id`; respostas raw podem se repetir
-quando uma task é novamente tentada, preservando o histórico técnico da API.
+O Job aceita uma execução por vez e mantém execuções adicionais em fila, mas
+`fetch_channels` e `fetch_comments` podem rodar em paralelo na mesma execução.
+As tasks de fetch têm até duas tentativas adicionais, com intervalo mínimo de
+30 segundos; as tasks de controle têm uma tentativa adicional. Há timeout de
+duas horas para o Job, uma hora para fetches e quinze minutos para
+controle/finalização. As operações Delta são idempotentes para o mesmo
+`ingestion_id`; respostas raw podem se repetir quando uma task é novamente
+tentada, preservando o histórico técnico da API.
 
 Todas as tasks usam o environment version 5 (Python 3.12) e a wheel produzida
 pelo Poetry. Cada notebook chama o módulo Python correspondente, sem duplicar
@@ -336,7 +372,7 @@ VS Code, escolha **Run now** no Job/Workflow `dev-youtube-ingestion`; não use a
 opção de executar o notebook atual, pois ela cria uma execução avulsa que não
 representa este pipeline.
 
-## Dashboard operacional
+## Dashboards e monitoramento
 
 O Bundle também versiona o dashboard **YouTube - Operação e evolução**. Ele
 mostra o estado dos vídeos monitorados, falhas pendentes, a evolução diária de
@@ -367,6 +403,12 @@ databricks bundle deploy -t dev
 
 O dashboard é criado como rascunho pelo deploy. Publique-o no workspace após a
 validação visual e conceda acesso apenas às pessoas que deverão consultá-lo.
+
+O Bundle também versiona o dashboard **YouTube - Saúde da ingestão**, voltado
+à operação do Workflow. Ele acompanha tentativas de tasks, taxa de sucesso,
+duração média, custo estimado da API, distribuição de status por task e os
+detalhes de erros por execução. Seus dados vêm de
+`control.task_execution_logs`.
 
 O Job foi implantado e executado com sucesso no target `dev` durante a validação
 inicial desta implementação.
@@ -422,6 +464,17 @@ FROM (
 )
 ORDER BY ended_at DESC;
 ```
+
+## Troubleshooting
+
+| Situação | Como resolver |
+|---|---|
+| A CLI retorna erro de autenticação ou não encontra credenciais. | Autentique a Databricks CLI no workspace alvo e execute os comandos com o profile correto. Valide antes com `databricks auth profiles`. |
+| O Job não lê a chave da YouTube API. | Confirme que o secret scope e a chave existem e que o Job tem permissão para lê-los. No target `dev`, os nomes esperados são `youtube_api_key` e `api-key`; ajuste `secret_scope` e `secret_key` para outro ambiente. Nunca inclua a chave no repositório. |
+| A API retorna `QUOTA_EXCEEDED`, `RATE_LIMITED` ou uma falha transitória. | Consulte `control.task_execution_logs` e a mensagem de erro. O cliente repete falhas transitórias; para quota esgotada, aguarde a reposição ou ajuste a frequência, o batch e os limites de comentários/replies. |
+| Um vídeo permanece em `PROCESSING`. | Consulte `control.video_processing_state`. Um processamento abandonado volta a ficar elegível após duas horas; verifique também a execução correspondente em `control.ingestion_runs` antes de intervir. |
+| O dashboard não apresenta dados ou uma view não existe. | Execute a célula de criação das tabelas/views `silver` do notebook `src/notebooks/00_setup.ipynb` no catálogo configurado para o target. Depois, valide as permissões do SQL Warehouse e do catálogo. |
+| O dashboard foi implantado, mas ainda não está acessível aos consumidores. | O deploy cria ou atualiza o rascunho. Faça a validação visual, publique o dashboard no workspace e conceda acesso às pessoas ou grupos necessários. |
 
 ## Desenvolvimento local
 
