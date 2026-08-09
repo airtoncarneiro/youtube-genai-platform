@@ -404,7 +404,11 @@ python -m json.tool src/notebooks/10_claim_targets.ipynb >/dev/null
 - Adicionar observabilidade operacional, métricas de qualidade e alertas.
 - Criar modelos `gold` para crescimento, engajamento e comparação entre vídeos
   e canais.
-- Incluir transcrições, NLP, embeddings, Vector Search, RAG e agentes de IA.
+- Não implementar a coleta de transcrições de canais de terceiros, para respeitar
+  direitos autorais e os termos de uso do YouTube. Essa capacidade poderá ser
+  implementada para o proprietário do próprio canal, mediante autenticação OAuth
+  e a permissão necessária para acessar as legendas pela API oficial.
+- Incluir NLP, embeddings, Vector Search, RAG e agentes de IA.
 
 ## Status
 

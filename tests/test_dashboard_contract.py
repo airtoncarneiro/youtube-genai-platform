@@ -24,7 +24,10 @@ def _setup_sql() -> str:
     return "".join(
         "".join(cell.get("source", []))
         for cell in notebook["cells"]
-        if cell["id"] in {"setup-control-ddl", "setup-raw-ddl", "setup-silver-ddl"}
+        if cell.get("id") in {"setup-control-ddl", "setup-raw-ddl", "setup-silver-ddl"}
+        or "CREATE TABLE IF NOT EXISTS youtube_lakehouse." in "".join(
+            cell.get("source", [])
+        )
     )
 
 
@@ -162,3 +165,12 @@ def test_key_columns_are_documented_for_genie() -> None:
         assert (
             f"COMMENT ON COLUMN youtube_lakehouse.silver.{column} IS '{prefix}"
         ) in setup
+
+
+def test_ingestion_runs_declares_a_reliable_primary_key() -> None:
+    setup = _setup_sql()
+
+    assert (
+        "CONSTRAINT ingestion_runs_pk PRIMARY KEY (ingestion_id) NOT ENFORCED RELY"
+        in setup
+    )
