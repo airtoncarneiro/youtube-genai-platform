@@ -17,14 +17,13 @@ resources:
           default: ${var.secret_scope}
         - name: secret_key
           default: ${var.secret_key}
-      trigger:
+      schedule:
         pause_status: UNPAUSED
-        periodic:
-          interval: 1
-          unit: HOURS
+        quartz_cron_expression: "0 0 18 * * ?"
+        timezone_id: America/Sao_Paulo
       tasks:
         - task_key: discover_channel_videos
-          description: Cadastra somente o upload mais recente quando ele for posterior ao último vídeo baixado.
+          description: Descobre uploads conforme o modo configurado para o canal e cadastra os novos vídeos.
           environment_key: default
           timeout_seconds: ${var.discovery_timeout_seconds}
           max_retries: ${var.fetch_max_retries}

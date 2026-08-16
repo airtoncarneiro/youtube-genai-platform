@@ -11,11 +11,10 @@ def test_channel_discovery_orchestrates_ingestion_after_discovery() -> None:
 
     assert "timeout_seconds: ${var.channel_discovery_job_timeout_seconds}" in discovery
     assert (
-        """trigger:
+        """schedule:
         pause_status: UNPAUSED
-        periodic:
-          interval: 1
-          unit: HOURS"""
+        quartz_cron_expression: "0 0 18 * * ?"
+        timezone_id: America/Sao_Paulo"""
         in discovery
     )
     assert (
