@@ -444,7 +444,7 @@ def fetch_replies_step(
         try:
             for comment_id in comment_ids:
                 replies.extend(
-                    client.normalize_reply(reply)
+                    client.normalize_reply(reply, video_id=video_id)
                     for reply in _bounded(client.iter_replies(comment_id), reply_limit)
                 )
             outcomes[video_id] = ("SUCCESS", None)

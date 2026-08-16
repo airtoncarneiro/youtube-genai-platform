@@ -527,14 +527,21 @@ class YouTubeClient:
     @staticmethod
     def normalize_reply(
         reply: dict[str, Any],
+        *,
+        video_id: str,
     ) -> dict[str, Any]:
-        """Map a raw reply resource to the silver replies schema."""
+        """Map a raw reply resource to the silver replies schema.
+
+        The comments.list response for a reply contains its parent comment but
+        not its video. The caller already knows the video being processed and
+        must provide that context explicitly.
+        """
         snippet = reply.get("snippet", {})
 
         return {
             "comment_id": reply.get("id"),
             "parent_id": snippet.get("parentId"),
-            "video_id": snippet.get("videoId"),
+            "video_id": video_id,
             "author_name": snippet.get("authorDisplayName"),
             "author_channel_id": (snippet.get("authorChannelId", {}).get("value")),
             "text": snippet.get("textDisplay"),

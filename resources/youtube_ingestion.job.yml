@@ -19,10 +19,14 @@ resources:
           default: ${var.secret_scope}
         - name: secret_key
           default: ${var.secret_key}
-      schedule:
-        quartz_cron_expression: "0 0 8 * * ?" # todos os dias às 08:00
-        timezone_id: "America/Sao_Paulo"
+      # Verifica a fila a cada hora. A reserva processa apenas os vídeos cuja
+      # janela de atualização de 24 h já expirou, evitando a execução diária
+      # antes de `next_refresh_at`.
+      trigger:
         pause_status: UNPAUSED
+        periodic:
+          interval: 1
+          unit: HOURS
       tasks:
         - task_key: claim_targets
           description: Cria a execução e reserva os vídeos elegíveis para processamento.

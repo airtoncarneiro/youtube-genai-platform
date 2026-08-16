@@ -86,6 +86,61 @@
         "WHERE row_num = 1 \n",
         "ORDER BY view_count DESC"
       ]
+    },
+    {
+      "name": "ds_comment_coverage_video",
+      "displayName": "Cobertura de comentários por vídeo",
+      "queryLines": [
+        "WITH reply_counts AS (\n",
+        "  SELECT parent_id, COUNT(DISTINCT comment_id) AS replies_collected\n",
+        "  FROM replies\n",
+        "  WHERE parent_id IS NOT NULL AND parent_id <> ''\n",
+        "  GROUP BY parent_id\n",
+        "), video_details AS (\n",
+        "  SELECT video_id, MAX_BY(title, ingested_at) AS video_title, MAX_BY(channel_id, ingested_at) AS channel_id\n",
+        "  FROM videos\n",
+        "  GROUP BY video_id\n",
+        "), channel_details AS (\n",
+        "  SELECT channel_id, MAX_BY(title, ingested_at) AS channel_title\n",
+        "  FROM channels\n",
+        "  GROUP BY channel_id\n",
+        ")\n",
+        "SELECT comments.video_id, COALESCE(videos.video_title, comments.video_id) AS video_title, channels.channel_title, COUNT(DISTINCT comments.thread_id) AS threads_collected, COUNT(DISTINCT comments.comment_id) AS top_level_comments_collected, COALESCE(SUM(comments.reply_count), 0) AS replies_declared, COALESCE(SUM(reply_counts.replies_collected), 0) AS replies_collected, CAST(COALESCE(SUM(reply_counts.replies_collected), 0) AS DOUBLE) / NULLIF(COALESCE(SUM(comments.reply_count), 0), 0) AS reply_coverage\n",
+        "FROM comments\n",
+        "LEFT JOIN reply_counts ON comments.comment_id = reply_counts.parent_id\n",
+        "LEFT JOIN video_details AS videos ON comments.video_id = videos.video_id\n",
+        "LEFT JOIN channel_details AS channels ON videos.channel_id = channels.channel_id\n",
+        "GROUP BY comments.video_id, videos.video_title, channels.channel_title\n",
+        "ORDER BY reply_coverage ASC NULLS LAST, replies_collected DESC"
+      ],
+      "columns": [
+        {"displayName": "Vídeos com comentários", "description": "Vídeos para os quais já há ao menos um comentário principal conhecido", "expression": "COUNT(DISTINCT `video_id`)"},
+        {"displayName": "Threads coletadas", "description": "Threads de comentários principais atualmente conhecidas", "expression": "SUM(`threads_collected`)"},
+        {"displayName": "Respostas coletadas", "description": "Respostas atualmente conhecidas, associadas ao comentário principal", "expression": "SUM(`replies_collected`)"},
+        {"displayName": "Cobertura de respostas", "description": "Respostas coletadas divididas pelas respostas declaradas pelo YouTube nas threads conhecidas", "expression": "SUM(`replies_collected`) * 1.0 / NULLIF(SUM(`replies_declared`), 0)"}
+      ]
+    },
+    {
+      "name": "ds_comment_coverage_thread",
+      "displayName": "Cobertura de respostas por comentário",
+      "queryLines": [
+        "WITH reply_counts AS (\n",
+        "  SELECT parent_id, COUNT(DISTINCT comment_id) AS replies_collected\n",
+        "  FROM replies\n",
+        "  WHERE parent_id IS NOT NULL AND parent_id <> ''\n",
+        "  GROUP BY parent_id\n",
+        "), video_details AS (\n",
+        "  SELECT video_id, MAX_BY(title, ingested_at) AS video_title\n",
+        "  FROM videos\n",
+        "  GROUP BY video_id\n",
+        ")\n",
+        "SELECT comments.video_id, COALESCE(videos.video_title, comments.video_id) AS video_title, comments.thread_id, comments.comment_id, comments.reply_count AS replies_declared, COALESCE(reply_counts.replies_collected, 0) AS replies_collected, CAST(COALESCE(reply_counts.replies_collected, 0) AS DOUBLE) / NULLIF(comments.reply_count, 0) AS reply_coverage\n",
+        "FROM comments\n",
+        "LEFT JOIN reply_counts ON comments.comment_id = reply_counts.parent_id\n",
+        "LEFT JOIN video_details AS videos ON comments.video_id = videos.video_id\n",
+        "WHERE comments.reply_count > 0\n",
+        "ORDER BY reply_coverage ASC NULLS LAST, replies_declared DESC"
+      ]
     }
   ],
   "pages": [
@@ -160,6 +215,77 @@
             "name": "recent-runs-table",
             "queries": [{"name": "main_query", "query": {"datasetName": "ds_runs", "fields": [{"name": "channel_name", "expression": "`channel_name`"}, {"name": "started_at", "expression": "`started_at`"}, {"name": "status", "expression": "`status`"}, {"name": "duration_seconds", "expression": "`duration_seconds`"}, {"name": "error_message", "expression": "`error_message`"}], "disaggregated": true}}],
             "spec": {"version": 2, "widgetType": "table", "encodings": {"columns": [{"fieldName": "channel_name", "displayName": "Canal"}, {"fieldName": "started_at", "displayName": "Iniciado em"}, {"fieldName": "status", "displayName": "Status"}, {"fieldName": "duration_seconds", "displayName": "Duração (s)"}, {"fieldName": "error_message", "displayName": "Erro"}]}, "frame": {"showTitle": true, "title": "Execuções recentes"}}
+          },
+          "position": {"x": 0, "y": 16, "width": 12, "height": 6}
+        }
+      ]
+    },
+    {
+      "name": "comment-coverage",
+      "displayName": "Cobertura de comentários",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "comment-coverage-header",
+            "multilineTextboxSpec": {"lines": ["# Cobertura de comentários\n", "Estado atualmente conhecido da coleta. Uma thread corresponde a um comentário principal; as respostas são associadas por comentário pai. A cobertura compara respostas coletadas com a quantidade pública declarada pelo YouTube."]}
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 2}
+        },
+        {
+          "widget": {
+            "name": "kpi-comment-videos",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_comment_coverage_video", "fields": [{"name": "measure(Vídeos com comentários)", "expression": "MEASURE(`Vídeos com comentários`)"}], "disaggregated": false}}],
+            "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": {"fieldName": "measure(Vídeos com comentários)", "displayName": "Vídeos"}}, "frame": {"showTitle": true, "title": "Vídeos com comentários"}}
+          },
+          "position": {"x": 0, "y": 2, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi-comment-threads",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_comment_coverage_video", "fields": [{"name": "measure(Threads coletadas)", "expression": "MEASURE(`Threads coletadas`)"}], "disaggregated": false}}],
+            "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": {"fieldName": "measure(Threads coletadas)", "displayName": "Threads"}}, "frame": {"showTitle": true, "title": "Threads coletadas"}}
+          },
+          "position": {"x": 3, "y": 2, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi-comment-replies",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_comment_coverage_video", "fields": [{"name": "measure(Respostas coletadas)", "expression": "MEASURE(`Respostas coletadas`)"}], "disaggregated": false}}],
+            "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": {"fieldName": "measure(Respostas coletadas)", "displayName": "Respostas"}}, "frame": {"showTitle": true, "title": "Respostas coletadas"}}
+          },
+          "position": {"x": 6, "y": 2, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi-reply-coverage",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_comment_coverage_video", "fields": [{"name": "measure(Cobertura de respostas)", "expression": "MEASURE(`Cobertura de respostas`)"}], "disaggregated": false}}],
+            "spec": {"version": 2, "widgetType": "counter", "encodings": {"value": {"fieldName": "measure(Cobertura de respostas)", "displayName": "Cobertura", "format": {"type": "number-percent", "decimalPlaces": {"type": "max", "places": 1}}}}, "frame": {"showTitle": true, "title": "Cobertura de respostas"}}
+          },
+          "position": {"x": 9, "y": 2, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "reply-coverage-by-video",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_comment_coverage_video", "fields": [{"name": "video_title", "expression": "`video_title`"}, {"name": "reply_coverage", "expression": "`reply_coverage`"}], "disaggregated": true}}],
+            "spec": {"version": 3, "widgetType": "bar", "encodings": {"x": {"fieldName": "video_title", "displayName": "Vídeo", "scale": {"type": "categorical"}}, "y": {"fieldName": "reply_coverage", "displayName": "Cobertura", "scale": {"type": "quantitative", "domainMin": 0, "domainMax": 1}}}, "frame": {"showTitle": true, "title": "Cobertura de respostas por vídeo", "showDescription": true, "description": "Respostas coletadas em relação ao total declarado pelo YouTube nas threads atualmente conhecidas."}}
+          },
+          "position": {"x": 0, "y": 5, "width": 12, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "comment-coverage-videos-table",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_comment_coverage_video", "fields": [{"name": "video_title", "expression": "`video_title`"}, {"name": "channel_title", "expression": "`channel_title`"}, {"name": "threads_collected", "expression": "`threads_collected`"}, {"name": "replies_declared", "expression": "`replies_declared`"}, {"name": "replies_collected", "expression": "`replies_collected`"}, {"name": "reply_coverage", "expression": "`reply_coverage`"}], "disaggregated": true}}],
+            "spec": {"version": 2, "widgetType": "table", "encodings": {"columns": [{"fieldName": "video_title", "displayName": "Vídeo"}, {"fieldName": "channel_title", "displayName": "Canal"}, {"fieldName": "threads_collected", "displayName": "Threads coletadas"}, {"fieldName": "replies_declared", "displayName": "Respostas declaradas"}, {"fieldName": "replies_collected", "displayName": "Respostas coletadas"}, {"fieldName": "reply_coverage", "displayName": "Cobertura", "format": {"type": "number-percent", "decimalPlaces": {"type": "max", "places": 1}}}]}, "frame": {"showTitle": true, "title": "Cobertura acumulada por vídeo"}}
+          },
+          "position": {"x": 0, "y": 10, "width": 12, "height": 6}
+        },
+        {
+          "widget": {
+            "name": "comment-thread-coverage-table",
+            "queries": [{"name": "main_query", "query": {"datasetName": "ds_comment_coverage_thread", "fields": [{"name": "video_title", "expression": "`video_title`"}, {"name": "comment_id", "expression": "`comment_id`"}, {"name": "replies_declared", "expression": "`replies_declared`"}, {"name": "replies_collected", "expression": "`replies_collected`"}, {"name": "reply_coverage", "expression": "`reply_coverage`"}], "disaggregated": true}}],
+            "spec": {"version": 2, "widgetType": "table", "encodings": {"columns": [{"fieldName": "video_title", "displayName": "Vídeo"}, {"fieldName": "comment_id", "displayName": "Comentário principal"}, {"fieldName": "replies_declared", "displayName": "Respostas declaradas"}, {"fieldName": "replies_collected", "displayName": "Respostas coletadas"}, {"fieldName": "reply_coverage", "displayName": "Cobertura", "format": {"type": "number-percent", "decimalPlaces": {"type": "max", "places": 1}}}]}, "frame": {"showTitle": true, "title": "Cobertura por comentário com respostas"}}
           },
           "position": {"x": 0, "y": 16, "width": 12, "height": 6}
         }

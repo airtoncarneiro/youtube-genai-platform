@@ -194,6 +194,23 @@ def test_normalizes_comment_with_nullable_parent_id() -> None:
     assert normalized["parent_id"] is None
 
 
+def test_normalizes_reply_with_video_id_from_collection_context() -> None:
+    normalized = YouTubeClient.normalize_reply(
+        {
+            "id": "reply-1",
+            "snippet": {
+                "parentId": "comment-1",
+                "videoId": "não-confiar-no-campo-ausente-ou-incompleto",
+            },
+        },
+        video_id="video-1",
+    )
+
+    assert normalized["comment_id"] == "reply-1"
+    assert normalized["parent_id"] == "comment-1"
+    assert normalized["video_id"] == "video-1"
+
+
 def test_normalizes_video_to_analytical_types_without_channel_title() -> None:
     normalized = YouTubeClient.normalize_video(
         {
