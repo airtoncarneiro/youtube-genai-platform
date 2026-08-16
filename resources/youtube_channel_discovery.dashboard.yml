@@ -1,0 +1,8 @@
+resources:
+  dashboards:
+    youtube_channel_discovery_dashboard:
+      display_name: "YouTube - Descoberta de vídeos"
+      file_path: ../src/dashboards/youtube_channel_discovery.lvdash.json
+      warehouse_id: ${var.dashboard_warehouse_id}
+      dataset_catalog: ${var.catalog}
+      dataset_schema: control

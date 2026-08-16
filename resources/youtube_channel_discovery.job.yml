@@ -1,0 +1,54 @@
+resources:
+  jobs:
+    youtube_channel_discovery:
+      name: "${bundle.target}-youtube-channel-discovery"
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+      timeout_seconds: ${var.channel_discovery_job_timeout_seconds}
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: new_video_priority
+          default: ${var.new_video_priority}
+        - name: new_video_refresh_interval_hours
+          default: ${var.new_video_refresh_interval_hours}
+        - name: secret_scope
+          default: ${var.secret_scope}
+        - name: secret_key
+          default: ${var.secret_key}
+      trigger:
+        pause_status: UNPAUSED
+        periodic:
+          interval: 1
+          unit: HOURS
+      tasks:
+        - task_key: discover_channel_videos
+          description: Cadastra somente o upload mais recente quando ele for posterior ao último vídeo baixado.
+          environment_key: default
+          timeout_seconds: ${var.discovery_timeout_seconds}
+          max_retries: ${var.fetch_max_retries}
+          min_retry_interval_millis: ${var.retry_interval_millis}
+          retry_on_timeout: true
+          notebook_task:
+            notebook_path: ../src/notebooks/15_discover_channel_videos.ipynb
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              new_video_priority: "{{job.parameters.new_video_priority}}"
+              new_video_refresh_interval_hours: "{{job.parameters.new_video_refresh_interval_hours}}"
+              task_run_id: "{{task.run_id}}"
+              secret_scope: "{{job.parameters.secret_scope}}"
+              secret_key: "{{job.parameters.secret_key}}"
+        - task_key: run_youtube_ingestion
+          description: Executa a ingestão após a descoberta, inclusive quando a descoberta terminar com falha.
+          depends_on:
+            - task_key: discover_channel_videos
+          run_if: ALL_DONE
+          run_job_task:
+            job_id: ${resources.jobs.youtube_ingestion.id}
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "5"
+            dependencies:
+              - ../dist/*.whl

@@ -185,6 +185,38 @@ def test_get_videos_sends_at_most_fifty_ids_per_request() -> None:
     assert client._get.call_args_list[1].kwargs["params"]["id"] == "50"
 
 
+def test_iter_uploads_uses_the_channel_uploads_playlist() -> None:
+    client = YouTubeClient(api_key="test-key")
+    client._get = Mock(return_value={"items": [{"id": "playlist-item"}]})
+
+    assert list(client.iter_uploads("uploads-playlist")) == [{"id": "playlist-item"}]
+    client._get.assert_called_once_with(
+        "playlistItems",
+        {
+            "part": "snippet,contentDetails",
+            "playlistId": "uploads-playlist",
+            "maxResults": 50,
+        },
+    )
+
+
+def test_normalizes_upload_published_at_to_a_datetime() -> None:
+    normalized = YouTubeClient.normalize_playlist_item(
+        {
+            "snippet": {"position": 0},
+            "contentDetails": {
+                "videoId": "video-1",
+                "videoPublishedAt": "2026-08-10T12:30:00Z",
+            },
+        }
+    )
+
+    assert normalized["video_id"] == "video-1"
+    assert normalized["published_at"] == datetime(
+        2026, 8, 10, 12, 30, tzinfo=timezone.utc
+    )
+
+
 def test_normalizes_comment_with_nullable_parent_id() -> None:
     normalized = YouTubeClient.normalize_top_level_comment(
         {"id": "thread", "snippet": {"topLevelComment": {"id": "comment"}}}

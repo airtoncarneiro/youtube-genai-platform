@@ -55,6 +55,194 @@ def test_positive_limit_bounds_the_paginated_collection() -> None:
     assert list(_bounded(iter([{"id": "one"}, {"id": "two"}]), 1)) == [{"id": "one"}]
 
 
+def test_discovery_enqueues_only_the_latest_upload_after_the_watermark() -> None:
+    from youtube_etl_genai.pipeline import _latest_upload_id_after_watermark
+
+    class FakeClient:
+        @staticmethod
+        def normalize_playlist_item(item: dict[str, object]) -> dict[str, object]:
+            return item
+
+        @staticmethod
+        def iter_uploads(_: str) -> object:
+            return iter(
+                [
+                    {
+                        "video_id": "newest",
+                        "published_at": datetime(2026, 8, 10, tzinfo=timezone.utc),
+                    },
+                    {
+                        "video_id": "newer",
+                        "published_at": datetime(2026, 8, 9, tzinfo=timezone.utc),
+                    },
+                    {
+                        "video_id": "cutoff",
+                        "published_at": datetime(2026, 8, 8, tzinfo=timezone.utc),
+                    },
+                    {
+                        "video_id": "must-not-be-read",
+                        "published_at": datetime(2026, 8, 7, tzinfo=timezone.utc),
+                    },
+                ]
+            )
+
+    assert (
+        _latest_upload_id_after_watermark(
+            FakeClient(),  # type: ignore[arg-type]
+            "uploads-playlist",
+            datetime(2026, 8, 8, tzinfo=timezone.utc),
+        )
+        == "newest"
+    )
+
+
+def test_all_mode_enqueues_every_upload_after_the_watermark() -> None:
+    from youtube_etl_genai.pipeline import _all_upload_ids_after_watermark
+
+    class FakeClient:
+        @staticmethod
+        def normalize_playlist_item(item: dict[str, object]) -> dict[str, object]:
+            return item
+
+        @staticmethod
+        def iter_uploads(_: str) -> object:
+            return iter(
+                [
+                    {
+                        "video_id": "newest",
+                        "published_at": datetime(2026, 8, 10, tzinfo=timezone.utc),
+                    },
+                    {
+                        "video_id": "newer",
+                        "published_at": datetime(2026, 8, 9, tzinfo=timezone.utc),
+                    },
+                    {
+                        "video_id": "cutoff",
+                        "published_at": datetime(2026, 8, 8, tzinfo=timezone.utc),
+                    },
+                ]
+            )
+
+    assert _all_upload_ids_after_watermark(
+        FakeClient(),  # type: ignore[arg-type]
+        "uploads-playlist",
+        datetime(2026, 8, 8, tzinfo=timezone.utc),
+    ) == ["newest", "newer"]
+
+
+def test_discovery_rejects_an_invalid_mode() -> None:
+    from youtube_etl_genai.pipeline import _upload_ids_for_discovery_mode
+
+    with pytest.raises(ValueError, match="Use NONE, ALL ou LAST"):
+        _upload_ids_for_discovery_mode(
+            object(),  # type: ignore[arg-type]
+            "uploads-playlist",
+            datetime(2026, 8, 8, tzinfo=timezone.utc),
+            "SOMETHING_ELSE",
+        )
+
+
+def test_discover_channel_videos_registers_new_ids_and_isolates_channel_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from youtube_etl_genai import pipeline
+
+    events: list[tuple[str, object]] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            self.response_observer = kwargs["response_observer"]
+            self.api_cost_units = 2
+
+        def iter_uploads(self, uploads_playlist_id: str) -> object:
+            if uploads_playlist_id == "broken-playlist":
+                raise RuntimeError("playlist indisponível")
+            self.response_observer(
+                "playlistItems", {"playlistId": uploads_playlist_id}, {"items": []}
+            )
+            return iter(
+                [
+                    {
+                        "video_id": "new-video",
+                        "published_at": datetime(2026, 8, 10, tzinfo=timezone.utc),
+                    },
+                    {
+                        "video_id": "second-new-video",
+                        "published_at": datetime(2026, 8, 9, tzinfo=timezone.utc),
+                    },
+                    {
+                        "video_id": "old-video",
+                        "published_at": datetime(2026, 8, 8, tzinfo=timezone.utc),
+                    },
+                ]
+            )
+
+        @staticmethod
+        def normalize_playlist_item(item: dict[str, object]) -> dict[str, object]:
+            return item
+
+    monkeypatch.setattr(pipeline, "YouTubeClient", FakeClient)
+    monkeypatch.setattr(
+        pipeline,
+        "append_channel_discovery_run",
+        lambda *args: events.append(("start", args)),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "channel_discovery_targets",
+        lambda *_: [
+            (
+                "channel-1",
+                "working-playlist",
+                "ALL",
+                datetime(2026, 8, 8, tzinfo=timezone.utc),
+            ),
+            (
+                "channel-2",
+                "broken-playlist",
+                "ALL",
+                datetime(2026, 8, 8, tzinfo=timezone.utc),
+            ),
+            ("channel-3", "no-watermark", "LAST", None),
+        ],
+    )
+    monkeypatch.setattr(pipeline, "schemas", lambda: {"api_responses": object()})
+    monkeypatch.setattr(
+        pipeline, "append_raw", lambda *args: events.append(("raw", args[2]))
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "register_discovered_video_targets",
+        lambda *args, **kwargs: events.append(("register", (args[2], kwargs))) or 1,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "finish_channel_discovery_run",
+        lambda *args, **kwargs: events.append(("finish", kwargs)),
+    )
+
+    result = pipeline.discover_channel_videos_step(spark=object(), api_key="api-key")
+
+    assert result["status"] == "PARTIAL_SUCCESS"
+    assert result["channels_attempted"] == 2
+    assert result["channels_succeeded"] == 1
+    assert result["channels_failed"] == 1
+    assert result["channels_skipped_without_watermark"] == 1
+    assert result["videos_discovered"] == 2
+    assert result["videos_registered"] == 1
+    assert result["api_cost_units"] == 2
+    assert events[1][0] == "raw"
+    assert events[2] == (
+        "register",
+        (
+            ["new-video", "second-new-video"],
+            {"priority": 100, "refresh_interval_hours": 24},
+        ),
+    )
+    assert events[3][1]["status"] == "PARTIAL_SUCCESS"
+    assert events[3][1]["api_cost_units"] == 2
+
+
 def test_projects_only_video_metrics_into_an_immutable_snapshot() -> None:
     collected_at = datetime(2026, 8, 8, 10, 30, tzinfo=timezone.utc)
 

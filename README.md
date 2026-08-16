@@ -27,6 +27,7 @@ substituir esse valor pela variável `catalog` do Bundle.
 - [Estrutura do projeto](#estrutura-do-projeto)
 - [Pré-requisitos](#pré-requisitos)
 - [Preparar o Lakehouse e cadastrar vídeos](#preparar-o-lakehouse-e-cadastrar-vídeos)
+- [Descoberta automática por canal](#descoberta-automática-por-canal)
 - [Databricks Asset Bundle e execução](#databricks-asset-bundle-e-execução)
 - [Dashboards e monitoramento](#dashboards-e-monitoramento)
 - [Consultas de verificação](#consultas-de-verificação)
@@ -77,6 +78,8 @@ control.ingestion_step_outcomes é o handoff durável entre as tasks.
 | Camada | Tabelas | Finalidade |
 |---|---|---|
 | `control` | `video_targets` | Lista inicial de vídeos, prioridade, ativação e intervalo de atualização. |
+| `control` | `channel_targets` | Modo manual por canal para descobrir uploads novos: `NONE`, `ALL` ou `LAST`. |
+| `control` | `channel_discovery_runs` | Auditoria de cada execução do Job de descoberta por canal. |
 | `control` | `video_processing_state` | Reserva de processamento, tentativas, último sucesso, próximo refresh e erro mais recente por vídeo. |
 | `control` | `ingestion_runs` | Auditoria da execução: início, fim, estado, canal ou canais observados e erro global. |
 | `control` | `ingestion_step_outcomes` | Resultado de cada fetch por vídeo e execução; permite diagnosticar falhas e finalizar o target somente quando todas as etapas terminarem. |
@@ -125,56 +128,6 @@ comentário. O valor `0` habilita paginação completa; um limite positivo reduz
 deliberadamente a coleta e é adequado para desenvolvimento ou recuperação
 controlada.
 
-### Atualização de schema para ambientes existentes
-
-Em um catálogo que já existe, execute uma única vez no Databricks SQL antes do
-próximo Job:
-
-```sql
-ALTER TABLE youtube_lakehouse.control.ingestion_runs
-ADD COLUMN channel_name STRING;
-
-COMMENT ON COLUMN youtube_lakehouse.control.ingestion_runs.channel_name
-IS 'Nome público do canal observado na API; para vários canais, nomes separados por vírgula';
-```
-
-Em uma instalação nova, o notebook `00_setup.ipynb` já cria a coluna. O Job
-preenche `channel_name` com o nome público retornado pela API; em uma execução
-que processar mais de um canal, os nomes são concatenados por vírgula.
-
-Para migrar um catálogo existente para o Workflow separado, execute também:
-
-```sql
-CREATE TABLE IF NOT EXISTS youtube_lakehouse.control.ingestion_step_outcomes (
-  ingestion_id STRING NOT NULL,
-  video_id STRING NOT NULL,
-  step STRING NOT NULL,
-  status STRING NOT NULL,
-  completed_at TIMESTAMP NOT NULL,
-  error_message STRING
-) USING DELTA;
-
-CREATE TABLE IF NOT EXISTS youtube_lakehouse.control.ingestion_comments (
-  ingestion_id STRING NOT NULL,
-  video_id STRING NOT NULL,
-  comment_id STRING NOT NULL
-) USING DELTA;
-```
-
-Para adicionar a telemetria das tasks em um catálogo existente, execute também
-[002_task_execution_logs.sql](migrations/002_task_execution_logs.sql) uma única
-vez antes do próximo Job. Em uma instalação nova, `00_setup.ipynb` já cria essa
-tabela.
-
-### Evolução da modelagem silver
-
-Para um catálogo que já contenha as tabelas silver antigas, pare o Job e execute
-uma única vez [001_silver_modeling.sql](migrations/001_silver_modeling.sql) em
-um SQL Warehouse. A migração cria as tabelas v2, move os dados, normaliza as
-tags e troca os nomes das tabelas; os backups `*_legacy_001` são preservados
-para validação e rollback. Em uma instalação nova, basta executar
-`src/notebooks/00_setup.ipynb`.
-
 ## Resiliência da API
 
 Cada chamada à YouTube Data API tem até três tentativas. Falhas de conexão,
@@ -210,12 +163,14 @@ O resumo de cada tentativa é persistido em
 .
 ├── src/
 │   ├── dashboards/
+│   │   ├── youtube_channel_discovery.lvdash.json # dashboard de descoberta por canal
 │   │   ├── youtube_operational.lvdash.json # dashboard de operação e evolução
 │   │   └── youtube_task_execution.lvdash.json # dashboard de saúde da ingestão
 │   ├── notebooks/
 │   │   ├── 00_setup.ipynb                  # cria catálogo, schemas e tabelas
 │   │   ├── 01_youtube_ingestion_test.ipynb # consulta as tabelas do lakehouse
 │   │   ├── 10_claim_targets.ipynb          # task de reserva dos targets
+│   │   ├── 15_discover_channel_videos.ipynb # task de descoberta de uploads
 │   │   ├── 20_fetch_videos.ipynb           # task de vídeos
 │   │   ├── 30_fetch_channels.ipynb         # task de canais
 │   │   ├── 40_fetch_comments.ipynb         # task de comentários
@@ -230,12 +185,9 @@ O resumo de cada tentativa é persistido em
 ├── resources/
 │   ├── youtube_operational.dashboard.yml   # recurso do dashboard no Bundle
 │   ├── youtube_task_execution.dashboard.yml # recurso do dashboard de saúde
+│   ├── youtube_channel_discovery.job.yml     # Job que orquestra descoberta e ingestão
 │   ├── youtube_ingestion.job.yml            # Job serverless do Bundle
 │   └── youtube_partial_success.alert.yml    # alerta SQL de resultado parcial
-├── migrations/
-│   ├── 001_silver_modeling.sql             # evolução reversível da silver existente
-│   ├── 002_task_execution_logs.sql         # telemetria para catálogos existentes
-│   └── 003_rename_dashboard_views.sql       # renomeia as views de apresentação
 ├── tests/
 ├── databricks.yml
 ├── pyproject.toml
@@ -266,11 +218,9 @@ versionada ou comando de terminal.
 
 ## Preparar o Lakehouse e cadastrar vídeos
 
-1. Abra e execute `src/notebooks/00_setup.ipynb` no Databricks.
-
-   > A primeira célula do notebook executa `DROP CATALOG ... CASCADE`. Use-a
-   > apenas para reinicializar um ambiente de desenvolvimento ou testes. Em um
-   > catálogo com dados que devem ser preservados, não execute essa célula.
+1. Abra e execute `src/notebooks/00_setup.ipynb` no Databricks. O notebook
+   cria o catálogo `youtube_lakehouse`, os schemas, as tabelas e as views de
+   apresentação necessárias ao Job e aos dashboards.
 
 2. Cadastre os vídeos a acompanhar. Em uma URL comum, o ID é o valor após
    `v=`. Por exemplo, `https://www.youtube.com/watch?v=dNJbFHRuHRk` corresponde
@@ -312,6 +262,60 @@ versionada ou comando de terminal.
    WHERE video_id = 'dNJbFHRuHRk';
    ```
 
+## Descoberta automática por canal
+
+O Job orquestrador `youtube_channel_discovery` consulta os canais cujo
+`discovery_mode` em `control.channel_targets` é `ALL` ou `LAST`. Ele usa o maior
+`published_at` já gravado em `silver.videos` para o canal como corte. O
+`youtube_ingestion` permanece o único responsável por gravar os dados completos
+em `silver`.
+
+| Modo | Comportamento |
+|---|---|
+| `NONE` | Não consulta a playlist de uploads. É o padrão. |
+| `ALL` | Cadastra todos os uploads posteriores ao corte. |
+| `LAST` | Cadastra somente o upload mais recente se ele for posterior ao corte. |
+
+O Job valida esses valores. Qualquer modo diferente de `NONE`, `ALL` ou `LAST`
+é registrado como falha do canal na execução de descoberta.
+
+Nenhum canal é consultado automaticamente. Após a ingestão de ao menos um vídeo
+do canal, configure o modo desejado com:
+
+```sql
+MERGE INTO youtube_lakehouse.control.channel_targets AS target
+USING (
+  SELECT 'UCxxxxxxxxxxxxxxxxxxxxxx' AS channel_id, 'LAST' AS discovery_mode
+) AS source
+ON target.channel_id = source.channel_id
+WHEN MATCHED THEN UPDATE SET
+  target.discovery_mode = source.discovery_mode,
+  target.updated_at = current_timestamp()
+WHEN NOT MATCHED THEN INSERT (
+  channel_id,
+  discovery_mode,
+  created_at,
+  updated_at
+) VALUES (
+  source.channel_id,
+  source.discovery_mode,
+  current_timestamp(),
+  current_timestamp()
+);
+```
+
+No modo `LAST`, o Job lê apenas o upload mais recente da playlist. Se o corte
+estiver em 2025, uma execução em 2026 cadastra somente o vídeo mais recente de
+2026; os vídeos intermediários não são incluídos. No modo `ALL`, ele pagina a
+playlist e cadastra todos os vídeos posteriores ao corte. A inserção na fila é
+idempotente: um ID já presente em `control.video_targets` não é alterado nem
+duplicado.
+
+Em catálogos existentes, execute uma vez
+[004_channel_discovery.sql](migrations/004_channel_discovery.sql) antes de
+implantar o novo Job. Em uma instalação nova, `00_setup.ipynb` já cria as duas
+tabelas de controle.
+
 ## Databricks Asset Bundle e execução
 
 O Bundle cria o Job `youtube_ingestion` com seis tasks serverless:
@@ -328,6 +332,13 @@ duas horas para o Job, uma hora para fetches e quinze minutos para
 controle/finalização. As operações Delta são idempotentes para o mesmo
 `ingestion_id`; respostas raw podem se repetir quando uma task é novamente
 tentada, preservando o histórico técnico da API.
+
+O Bundle também cria `youtube_channel_discovery`, agendado de hora em hora. Ele
+primeiro cadastra vídeos recém-descobertos na fila e, em seguida, executa o Job
+`youtube_ingestion`. A tarefa encadeada usa `run_if: ALL_DONE`: mesmo que a
+descoberta falhe, a fila existente — inclusive vídeos cadastrados manualmente —
+continua sendo processada. `youtube_ingestion` não possui agendamento próprio,
+mas permanece disponível para execuções manuais.
 
 Todas as tasks usam o environment version 5 (Python 3.12) e a wheel produzida
 pelo Poetry. Cada notebook chama o módulo Python correspondente, sem duplicar
@@ -350,6 +361,8 @@ Parâmetros do Workflow:
 | `batch_size` | `20` | Máximo de vídeos elegíveis reservados por `claim_targets`. |
 | `max_comments_per_video` | `20` | Máximo de comentários por vídeo em `fetch_comments`; `0` pagina todos. |
 | `max_replies_per_comment` | `5` | Máximo de replies por comentário em `fetch_replies`; `0` pagina todas. |
+| `new_video_priority` | `100` | Prioridade dos vídeos cadastrados pelo Job de descoberta. |
+| `new_video_refresh_interval_hours` | `24` | Intervalo de atualização dos vídeos cadastrados pelo Job de descoberta. |
 | `secret_scope` | `youtube_api_key` | Scope que contém a chave da YouTube API. |
 | `secret_key` | `api-key` | Nome da chave dentro do scope. |
 
@@ -363,7 +376,8 @@ Comandos principais:
 ```bash
 databricks bundle validate --strict -t dev
 databricks bundle deploy -t dev
-databricks bundle run -t dev youtube_ingestion
+databricks bundle run -t dev youtube_channel_discovery # descoberta e ingestão
+databricks bundle run -t dev youtube_ingestion          # ingestão manual avulsa
 ```
 
 `bundle deploy` constrói a wheel, sincroniza os arquivos e cria ou atualiza o
@@ -382,15 +396,19 @@ dia, evitando somar múltiplas coletas do mesmo vídeo ou canal.
 
 O dashboard usa quatro views de apresentação no schema `silver`:
 `vw_dashboard_ingestion_runs`, `vw_dashboard_video_targets`,
-`vw_dashboard_video_metrics` e `vw_dashboard_channel_metrics`. Elas são criadas pelo
-notebook `00_setup.ipynb`; execute novamente apenas a célula das tabelas
-`silver` ao atualizar um ambiente já existente.
+`vw_dashboard_video_metrics` e `vw_dashboard_channel_metrics`. Elas são criadas
+no setup inicial pelo notebook `00_setup.ipynb`.
 
 As séries exibem os 90 dias mais recentes, consideram somente targets ativos e
 carregam a última observação conhecida de cada entidade até cada dia (*last
 observation carried forward*). A tabela de execuções é limitada aos últimos 30
-dias e a 500 registros. O catálogo do recurso permanece `youtube_lakehouse`, o
-mesmo catálogo no qual o notebook de setup cria as views de apresentação.
+dias e a 500 registros. O catálogo do recurso é `youtube_lakehouse`, o mesmo
+catálogo criado pelo notebook de setup.
+
+Além da visão geral, o dashboard **YouTube - Operação e evolução** tem a página
+de cobertura de comentários. Ela mostra vídeos com comentários, threads e
+respostas coletadas, cobertura agregada e cobertura por vídeo e por comentário,
+comparando as respostas coletadas com o total declarado pelo YouTube.
 
 No target `dev`, o Bundle já aponta para o SQL Warehouse Serverless Starter.
 Para outro target, configure `dashboard_warehouse_id` com o ID de um SQL
@@ -410,8 +428,10 @@ duração média, custo estimado da API, distribuição de status por task e os
 detalhes de erros por execução. Seus dados vêm de
 `control.task_execution_logs`.
 
-O Job foi implantado e executado com sucesso no target `dev` durante a validação
-inicial desta implementação.
+O dashboard **YouTube - Descoberta de vídeos** acompanha o modo configurado
+para cada canal, os vídeos cadastrados automaticamente, falhas por canal,
+custo estimado de API e o histórico de execuções do Job independente. Seus
+dados vêm de `control.channel_targets` e `control.channel_discovery_runs`.
 
 ## Consultas de verificação
 
@@ -503,6 +523,7 @@ Valide os notebooks separadamente, pois são arquivos JSON:
 python -m json.tool src/notebooks/00_setup.ipynb >/dev/null
 python -m json.tool src/notebooks/01_youtube_ingestion_test.ipynb >/dev/null
 python -m json.tool src/notebooks/10_claim_targets.ipynb >/dev/null
+python -m json.tool src/notebooks/15_discover_channel_videos.ipynb >/dev/null
 ```
 
 ## Próximas evoluções
@@ -512,10 +533,10 @@ python -m json.tool src/notebooks/10_claim_targets.ipynb >/dev/null
 - Adicionar métricas de qualidade e alertas de taxa de erro ou duração anômala.
 - Criar modelos `gold` para crescimento, engajamento e comparação entre vídeos
   e canais.
-- Não implementar a coleta de transcrições de canais de terceiros, para respeitar
-  direitos autorais e os termos de uso do YouTube. Essa capacidade poderá ser
-  implementada para o proprietário do próprio canal, mediante autenticação OAuth
-  e a permissão necessária para acessar as legendas pela API oficial.
+- Manter fora do escopo a coleta de transcrições de canais de terceiros, para
+  respeitar direitos autorais e os termos de uso do YouTube. Para o proprietário
+  do próprio canal, avaliar uma implementação baseada na API oficial, com OAuth
+  e a permissão necessária para acessar as legendas.
 - Incluir NLP, embeddings, Vector Search, RAG e agentes de IA.
 
 ## Status

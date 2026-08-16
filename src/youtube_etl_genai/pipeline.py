@@ -10,9 +10,12 @@ from uuid import uuid4
 
 from youtube_etl_genai.persistence import (
     append_raw,
+    append_channel_discovery_run,
     append_run_start,
+    channel_discovery_targets,
     claim_video_targets,
     clear_ingestion_comments,
+    finish_channel_discovery_run,
     finish_run,
     finish_video_target,
     ingestion_comment_ids,
@@ -20,6 +23,7 @@ from youtube_etl_genai.persistence import (
     merge_silver,
     merge_snapshots,
     record_step_outcomes,
+    register_discovered_video_targets,
     replace_ingestion_comments,
     replace_video_tags,
     schemas,
@@ -142,6 +146,228 @@ def claim_targets_step(
         "api_cost_units": 0,
     }
     LOGGER.info("Targets reservados: %s", result)
+    return result
+
+
+def _as_utc_datetime(value: object) -> datetime | None:
+    """Normalize an API or Spark timestamp before comparing published dates."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _latest_upload_id_after_watermark(
+    client: YouTubeClient,
+    uploads_playlist_id: str,
+    last_downloaded_published_at: datetime,
+) -> str | None:
+    """Return only the most recent upload when it is newer than the watermark.
+
+    The uploads playlist is ordered newest first. Intentionally inspect only
+    its first item: historical uploads between the persisted watermark and the
+    current execution are not backfilled.
+    """
+    watermark = _as_utc_datetime(last_downloaded_published_at)
+    if watermark is None:
+        return None
+
+    try:
+        item = next(client.iter_uploads(uploads_playlist_id))
+    except StopIteration:
+        return None
+
+    normalized = client.normalize_playlist_item(item)
+    published_at = _as_utc_datetime(normalized.get("published_at"))
+    if published_at is None or published_at <= watermark:
+        return None
+    video_id = normalized.get("video_id")
+    return video_id if isinstance(video_id, str) and video_id else None
+
+
+def _all_upload_ids_after_watermark(
+    client: YouTubeClient,
+    uploads_playlist_id: str,
+    last_downloaded_published_at: datetime,
+) -> list[str]:
+    """Return every upload newer than the persisted watermark, newest first."""
+    watermark = _as_utc_datetime(last_downloaded_published_at)
+    if watermark is None:
+        return []
+
+    video_ids: list[str] = []
+    for item in client.iter_uploads(uploads_playlist_id):
+        normalized = client.normalize_playlist_item(item)
+        published_at = _as_utc_datetime(normalized.get("published_at"))
+        if published_at is None:
+            continue
+        if published_at <= watermark:
+            break
+        video_id = normalized.get("video_id")
+        if isinstance(video_id, str) and video_id:
+            video_ids.append(video_id)
+    return video_ids
+
+
+def _upload_ids_for_discovery_mode(
+    client: YouTubeClient,
+    uploads_playlist_id: str,
+    last_downloaded_published_at: datetime,
+    discovery_mode: str,
+) -> list[str]:
+    """Select uploads according to one of the supported channel discovery modes."""
+    if discovery_mode == "ALL":
+        return _all_upload_ids_after_watermark(
+            client, uploads_playlist_id, last_downloaded_published_at
+        )
+    if discovery_mode == "LAST":
+        latest_upload_id = _latest_upload_id_after_watermark(
+            client, uploads_playlist_id, last_downloaded_published_at
+        )
+        return [latest_upload_id] if latest_upload_id is not None else []
+    raise ValueError(
+        f"discovery_mode inválido para o canal: {discovery_mode!r}. "
+        "Use NONE, ALL ou LAST."
+    )
+
+
+def discover_channel_videos_step(
+    *,
+    spark: Any,
+    api_key: str,
+    new_video_priority: str = "100",
+    new_video_refresh_interval_hours: str = "24",
+    catalog: str = "youtube_lakehouse",
+    api_cost_observer: Callable[[int], None] | None = None,
+) -> dict[str, int | str]:
+    """Discover enabled-channel uploads and enqueue IDs for existing ingestion.
+
+    This intentionally does not write ``silver.videos``. The established
+    ``youtube_ingestion`` Job remains the sole owner of complete video,
+    channel, comment, reply, and snapshot persistence.
+    """
+    priority = _validate_limit(
+        new_video_priority, "new_video_priority", allow_zero=False
+    )
+    refresh_interval_hours = _validate_limit(
+        new_video_refresh_interval_hours,
+        "new_video_refresh_interval_hours",
+        allow_zero=False,
+    )
+    discovery_id = str(uuid4())
+    append_channel_discovery_run(spark, catalog, discovery_id)
+    raw, observe = _response_collector(discovery_id)
+    targets = channel_discovery_targets(spark, catalog)
+    channels_attempted = 0
+    channels_succeeded = 0
+    channels_failed = 0
+    channels_skipped_without_watermark = 0
+    errors: list[str] = []
+    discovered_ids: list[str] = []
+    raw_persisted = False
+    client = YouTubeClient(
+        api_key=api_key,
+        response_observer=observe,
+        ingestion_id=discovery_id,
+        api_cost_observer=api_cost_observer,
+    )
+
+    try:
+        for (
+            channel_id,
+            uploads_playlist_id,
+            discovery_mode,
+            last_published_at,
+        ) in targets:
+            watermark = _as_utc_datetime(last_published_at)
+            if watermark is None:
+                channels_skipped_without_watermark += 1
+                LOGGER.warning(
+                    "Canal %s ignorado: não há vídeo baixado para formar o corte",
+                    channel_id,
+                )
+                continue
+            channels_attempted += 1
+            try:
+                discovered_ids.extend(
+                    _upload_ids_for_discovery_mode(
+                        client,
+                        uploads_playlist_id,
+                        watermark,
+                        discovery_mode,
+                    )
+                )
+                channels_succeeded += 1
+            except Exception as exc:
+                channels_failed += 1
+                errors.append(f"{channel_id}: {exc}")
+                LOGGER.exception("Falha ao descobrir uploads do canal %s", channel_id)
+
+        append_raw(spark, catalog, raw, schemas()["api_responses"])
+        raw_persisted = True
+        unique_ids = sorted(set(discovered_ids))
+        videos_registered = register_discovered_video_targets(
+            spark,
+            catalog,
+            unique_ids,
+            priority=priority,
+            refresh_interval_hours=refresh_interval_hours,
+        )
+        status = "SUCCESS" if channels_failed == 0 else "PARTIAL_SUCCESS"
+        error_message = "; ".join(errors) or None
+        finish_channel_discovery_run(
+            spark,
+            catalog,
+            discovery_id,
+            status=status,
+            channels_attempted=channels_attempted,
+            channels_succeeded=channels_succeeded,
+            channels_failed=channels_failed,
+            videos_discovered=len(unique_ids),
+            videos_registered=videos_registered,
+            api_cost_units=client.api_cost_units,
+            error_message=error_message,
+        )
+    except Exception as exc:
+        if not raw_persisted:
+            append_raw(spark, catalog, raw, schemas()["api_responses"])
+        finish_channel_discovery_run(
+            spark,
+            catalog,
+            discovery_id,
+            status="FAILED",
+            channels_attempted=channels_attempted,
+            channels_succeeded=channels_succeeded,
+            channels_failed=channels_failed,
+            videos_discovered=len(set(discovered_ids)),
+            videos_registered=0,
+            api_cost_units=client.api_cost_units,
+            error_message=str(exc),
+        )
+        raise
+
+    result = {
+        "ingestion_id": discovery_id,
+        "status": status,
+        "channels_attempted": channels_attempted,
+        "channels_succeeded": channels_succeeded,
+        "channels_failed": channels_failed,
+        "channels_skipped_without_watermark": channels_skipped_without_watermark,
+        "videos_discovered": len(unique_ids),
+        "videos_registered": videos_registered,
+        "videos_attempted": channels_attempted,
+        "videos_succeeded": channels_succeeded,
+        "videos_failed": channels_failed,
+        "records_fetched": videos_registered,
+        "api_cost_units": client.api_cost_units,
+    }
+    LOGGER.info("Descoberta de vídeos por canal finalizada: %s", result)
     return result
 
 

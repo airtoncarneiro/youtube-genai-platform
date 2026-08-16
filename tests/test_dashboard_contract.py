@@ -25,9 +25,8 @@ def _setup_sql() -> str:
         "".join(cell.get("source", []))
         for cell in notebook["cells"]
         if cell.get("id") in {"setup-control-ddl", "setup-raw-ddl", "setup-silver-ddl"}
-        or "CREATE TABLE IF NOT EXISTS youtube_lakehouse." in "".join(
-            cell.get("source", [])
-        )
+        or "CREATE TABLE IF NOT EXISTS youtube_lakehouse."
+        in "".join(cell.get("source", []))
     )
 
 
@@ -82,10 +81,14 @@ def test_trends_use_active_entities_and_last_observation_carried_forward() -> No
 
 def test_failed_counter_only_counts_active_targets() -> None:
     targets = next(
-        dataset for dataset in _dashboard()["datasets"] if dataset["name"] == "ds_targets"
+        dataset
+        for dataset in _dashboard()["datasets"]
+        if dataset["name"] == "ds_targets"
     )
     failed = next(
-        column for column in targets["columns"] if column["displayName"] == "Vídeos com falha"
+        column
+        for column in targets["columns"]
+        if column["displayName"] == "Vídeos com falha"
     )
 
     assert "`is_active` AND `status` = 'FAILED'" in failed["expression"]
@@ -172,5 +175,24 @@ def test_ingestion_runs_declares_a_reliable_primary_key() -> None:
 
     assert (
         "CONSTRAINT ingestion_runs_pk PRIMARY KEY (ingestion_id) NOT ENFORCED RELY"
+        in setup
+    )
+
+
+def test_channel_discovery_control_tables_are_created_and_documented() -> None:
+    setup = _setup_sql()
+
+    assert (
+        "CREATE TABLE IF NOT EXISTS youtube_lakehouse.control.channel_targets" in setup
+    )
+    assert "discovery_mode STRING NOT NULL DEFAULT 'NONE'" in setup
+    assert "channel_targets_discovery_mode" not in setup
+    assert "'delta.feature.allowColumnDefaults' = 'supported'" in setup
+    assert (
+        "CREATE TABLE IF NOT EXISTS youtube_lakehouse.control.channel_discovery_runs"
+        in setup
+    )
+    assert (
+        "CONSTRAINT channel_discovery_runs_pk PRIMARY KEY (discovery_id) NOT ENFORCED RELY"
         in setup
     )

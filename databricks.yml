@@ -36,12 +36,24 @@ variables:
   control_timeout_seconds:
     description: Tempo máximo das tasks de controle e finalização.
     default: 900
+  discovery_timeout_seconds:
+    description: Tempo máximo da task de descoberta de uploads recentes por canal.
+    default: 3600
+  channel_discovery_job_timeout_seconds:
+    description: Tempo máximo do Workflow de descoberta e da ingestão encadeada.
+    default: 10800
   fetch_max_retries:
     description: Tentativas adicionais para falhas transitórias nas tasks de fetch.
     default: 2
   retry_interval_millis:
     description: Intervalo mínimo entre tentativas de uma task.
     default: 30000
+  new_video_priority:
+    description: Prioridade aplicada aos vídeos cadastrados automaticamente por canal.
+    default: 100
+  new_video_refresh_interval_hours:
+    description: Intervalo de atualização aplicado aos vídeos cadastrados automaticamente por canal.
+    default: 24
   dashboard_warehouse_id:
     description: ID do SQL Warehouse usado pelo dashboard operacional.
 

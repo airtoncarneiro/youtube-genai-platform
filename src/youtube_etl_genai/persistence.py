@@ -187,6 +187,190 @@ def append_raw(
     )
 
 
+def append_channel_discovery_run(spark: Any, catalog: str, discovery_id: str) -> None:
+    """Append the initial audit row for one channel-discovery run."""
+    spark.createDataFrame(
+        [
+            (
+                discovery_id,
+                datetime.now(timezone.utc),
+                None,
+                "RUNNING",
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                None,
+            )
+        ],
+        "discovery_id string, started_at timestamp, ended_at timestamp, status string, "
+        "channels_attempted bigint, channels_succeeded bigint, channels_failed bigint, "
+        "videos_discovered bigint, videos_registered bigint, api_cost_units bigint, "
+        "error_message string",
+    ).write.mode("append").format("delta").saveAsTable(
+        f"{catalog}.control.channel_discovery_runs"
+    )
+
+
+def finish_channel_discovery_run(
+    spark: Any,
+    catalog: str,
+    discovery_id: str,
+    *,
+    status: str,
+    channels_attempted: int,
+    channels_succeeded: int,
+    channels_failed: int,
+    videos_discovered: int,
+    videos_registered: int,
+    api_cost_units: int,
+    error_message: str | None = None,
+) -> None:
+    """Persist the final business result of a channel-discovery run."""
+    view_name = f"completed_channel_discovery_{uuid4().hex}"
+    spark.createDataFrame(
+        [
+            (
+                discovery_id,
+                status,
+                channels_attempted,
+                channels_succeeded,
+                channels_failed,
+                videos_discovered,
+                videos_registered,
+                api_cost_units,
+                error_message,
+            )
+        ],
+        "discovery_id string, status string, channels_attempted bigint, "
+        "channels_succeeded bigint, channels_failed bigint, videos_discovered bigint, "
+        "videos_registered bigint, api_cost_units bigint, error_message string",
+    ).createOrReplaceTempView(view_name)
+    try:
+        spark.sql(
+            f"""
+            MERGE INTO {catalog}.control.channel_discovery_runs AS target
+            USING {view_name} AS source
+            ON target.discovery_id = source.discovery_id
+            WHEN MATCHED THEN UPDATE SET
+              target.ended_at = current_timestamp(),
+              target.status = source.status,
+              target.channels_attempted = source.channels_attempted,
+              target.channels_succeeded = source.channels_succeeded,
+              target.channels_failed = source.channels_failed,
+              target.videos_discovered = source.videos_discovered,
+              target.videos_registered = source.videos_registered,
+              target.api_cost_units = source.api_cost_units,
+              target.error_message = source.error_message
+            """
+        )
+    finally:
+        spark.catalog.dropTempView(view_name)
+
+
+def channel_discovery_targets(
+    spark: Any, catalog: str
+) -> list[tuple[str, str, str, datetime | None]]:
+    """Return enabled channels, their mode, uploads playlist, and watermark."""
+    rows = spark.sql(
+        f"""
+        SELECT
+          target.channel_id,
+          channel.uploads_playlist_id,
+          target.discovery_mode,
+          MAX(video.published_at) AS last_downloaded_published_at
+        FROM {catalog}.control.channel_targets AS target
+        INNER JOIN {catalog}.silver.channels AS channel
+          ON target.channel_id = channel.channel_id
+        LEFT JOIN {catalog}.silver.videos AS video
+          ON channel.channel_id = video.channel_id
+        WHERE target.discovery_mode <> 'NONE'
+          AND channel.uploads_playlist_id IS NOT NULL
+        GROUP BY target.channel_id, channel.uploads_playlist_id, target.discovery_mode
+        ORDER BY target.channel_id
+        """
+    ).collect()
+    return [
+        (
+            row.channel_id,
+            row.uploads_playlist_id,
+            row.discovery_mode,
+            row.last_downloaded_published_at,
+        )
+        for row in rows
+    ]
+
+
+def register_discovered_video_targets(
+    spark: Any,
+    catalog: str,
+    video_ids: list[str],
+    *,
+    priority: int,
+    refresh_interval_hours: int,
+) -> int:
+    """Idempotently register discovered IDs in the existing video target queue."""
+    unique_ids = sorted(set(video_ids))
+    if not unique_ids:
+        return 0
+
+    view_name = f"discovered_video_targets_{uuid4().hex}"
+    spark.createDataFrame(
+        [
+            (
+                video_id,
+                True,
+                priority,
+                refresh_interval_hours,
+                datetime.now(timezone.utc),
+                datetime.now(timezone.utc),
+            )
+            for video_id in unique_ids
+        ],
+        "video_id string, is_active boolean, priority int, refresh_interval_hours int, "
+        "created_at timestamp, updated_at timestamp",
+    ).createOrReplaceTempView(view_name)
+    try:
+        existing_ids = {
+            row.video_id
+            for row in spark.sql(
+                f"""
+                SELECT target.video_id
+                FROM {catalog}.control.video_targets AS target
+                INNER JOIN {view_name} AS source
+                  ON target.video_id = source.video_id
+                """
+            ).collect()
+        }
+        spark.sql(
+            f"""
+            MERGE INTO {catalog}.control.video_targets AS target
+            USING {view_name} AS source
+            ON target.video_id = source.video_id
+            WHEN NOT MATCHED THEN INSERT (
+              video_id,
+              is_active,
+              priority,
+              refresh_interval_hours,
+              created_at,
+              updated_at
+            ) VALUES (
+              source.video_id,
+              source.is_active,
+              source.priority,
+              source.refresh_interval_hours,
+              source.created_at,
+              source.updated_at
+            )
+            """
+        )
+        return len(unique_ids) - len(existing_ids)
+    finally:
+        spark.catalog.dropTempView(view_name)
+
+
 def merge_task_execution_log(
     spark: Any,
     catalog: str,

@@ -1,0 +1,453 @@
+{
+  "datasets": [
+    {
+      "name": "ds_channel_targets",
+      "displayName": "Canais configurados",
+      "queryLines": [
+        "SELECT channel_id, discovery_mode, created_at, updated_at \n",
+        "FROM channel_targets \n",
+        "ORDER BY CASE discovery_mode WHEN 'ALL' THEN 2 WHEN 'LAST' THEN 1 ELSE 0 END DESC, updated_at DESC, channel_id\n"
+      ],
+      "columns": [
+        {
+          "displayName": "Canais com descoberta ativa",
+          "description": "Quantidade de canais configurados nos modos ALL ou LAST",
+          "expression": "SUM(CASE WHEN `discovery_mode` <> 'NONE' THEN 1 ELSE 0 END)"
+        }
+      ]
+    },
+    {
+      "name": "ds_discovery_runs",
+      "displayName": "Execuções de descoberta",
+      "queryLines": [
+        "SELECT discovery_id, started_at, ended_at, CAST(started_at AS DATE) AS discovery_date, status, channels_attempted, channels_succeeded, channels_failed, videos_discovered, videos_registered, api_cost_units, error_message, ROUND(timestampdiff(SECOND, started_at, ended_at) / 60.0, 2) AS duration_minutes \n",
+        "FROM channel_discovery_runs \n",
+        "WHERE started_at >= date_sub(current_date(), 90) \n",
+        "ORDER BY started_at DESC\n"
+      ],
+      "columns": [
+        {
+          "displayName": "Vídeos cadastrados",
+          "description": "IDs novos inseridos na fila de ingestão",
+          "expression": "SUM(`videos_registered`)"
+        },
+        {
+          "displayName": "Falhas de canal",
+          "description": "Canais cuja consulta à playlist falhou",
+          "expression": "SUM(`channels_failed`)"
+        },
+        {
+          "displayName": "Custo estimado da API",
+          "description": "Estimativa baseada em chamadas HTTP à playlist de uploads",
+          "expression": "SUM(`api_cost_units`)"
+        }
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "overview",
+      "displayName": "Visão geral",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "dashboard-title",
+            "multilineTextboxSpec": {
+              "lines": ["## YouTube - Descoberta de vídeos"]
+            }
+          },
+          "position": {"x": 0, "y": 0, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "dashboard-description",
+            "multilineTextboxSpec": {
+              "lines": ["Acompanha os canais habilitados e a criação automática de novos targets para a ingestão."]
+            }
+          },
+          "position": {"x": 0, "y": 1, "width": 12, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "kpi-enabled-channels",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_channel_targets",
+                  "fields": [
+                    {
+                      "name": "measure(Canais com descoberta ativa)",
+                      "expression": "MEASURE(`Canais com descoberta ativa`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(Canais com descoberta ativa)",
+                  "displayName": "Canais ativos"
+                }
+              },
+              "frame": {"showTitle": true, "title": "Canais com descoberta ativa"}
+            }
+          },
+          "position": {"x": 0, "y": 2, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi-videos-registered",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_discovery_runs",
+                  "fields": [
+                    {
+                      "name": "measure(Vídeos cadastrados)",
+                      "expression": "MEASURE(`Vídeos cadastrados`)"
+                    },
+                    {
+                      "name": "daily(discovery_date)",
+                      "expression": "DATE_TRUNC(\"DAY\", `discovery_date`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(Vídeos cadastrados)",
+                  "displayName": "Vídeos cadastrados",
+                  "format": {"type": "number", "abbreviation": "compact"}
+                },
+                "period": {"fieldName": "daily(discovery_date)"}
+              },
+              "frame": {"showTitle": true, "title": "Vídeos cadastrados"}
+            }
+          },
+          "position": {"x": 3, "y": 2, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi-channel-failures",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_discovery_runs",
+                  "fields": [
+                    {
+                      "name": "measure(Falhas de canal)",
+                      "expression": "MEASURE(`Falhas de canal`)"
+                    },
+                    {
+                      "name": "daily(discovery_date)",
+                      "expression": "DATE_TRUNC(\"DAY\", `discovery_date`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(Falhas de canal)",
+                  "displayName": "Falhas de canal"
+                },
+                "period": {"fieldName": "daily(discovery_date)"}
+              },
+              "frame": {"showTitle": true, "title": "Falhas de canal"}
+            }
+          },
+          "position": {"x": 6, "y": 2, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi-api-cost",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_discovery_runs",
+                  "fields": [
+                    {
+                      "name": "measure(Custo estimado da API)",
+                      "expression": "MEASURE(`Custo estimado da API`)"
+                    },
+                    {
+                      "name": "daily(discovery_date)",
+                      "expression": "DATE_TRUNC(\"DAY\", `discovery_date`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(Custo estimado da API)",
+                  "displayName": "Custo estimado da API"
+                },
+                "period": {"fieldName": "daily(discovery_date)"}
+              },
+              "frame": {"showTitle": true, "title": "Chamadas estimadas à API"}
+            }
+          },
+          "position": {"x": 9, "y": 2, "width": 3, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "daily-registered-videos",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_discovery_runs",
+                  "fields": [
+                    {
+                      "name": "discovery_date",
+                      "expression": "`discovery_date`"
+                    },
+                    {
+                      "name": "sum(videos_registered)",
+                      "expression": "SUM(`videos_registered`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {"fieldName": "discovery_date", "scale": {"type": "temporal"}},
+                "y": {
+                  "fieldName": "sum(videos_registered)",
+                  "displayName": "Vídeos cadastrados",
+                  "scale": {"type": "quantitative", "domainMin": 0}
+                }
+              },
+              "frame": {"showTitle": true, "title": "Vídeos cadastrados por dia"}
+            }
+          },
+          "position": {"x": 0, "y": 6, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "discovery-status",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_discovery_runs",
+                  "fields": [
+                    {"name": "status", "expression": "`status`"},
+                    {"name": "count(*)", "expression": "COUNT(`*`)"}
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "status", "scale": {"type": "categorical"}},
+                "y": {
+                  "fieldName": "count(*)",
+                  "displayName": "Execuções",
+                  "scale": {"type": "quantitative", "domainMin": 0}
+                },
+                "color": {
+                  "fieldName": "status",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {"value": "SUCCESS", "color": "#21918C"},
+                      {"value": "PARTIAL_SUCCESS", "color": "#F89441"},
+                      {"value": "FAILED", "color": "#FF7E5C"},
+                      {"value": "RUNNING", "color": "#3B528B"}
+                    ]
+                  }
+                }
+              },
+              "frame": {"showTitle": true, "title": "Execuções por status"}
+            }
+          },
+          "position": {"x": 6, "y": 6, "width": 6, "height": 5}
+        },
+        {
+          "widget": {
+            "name": "channel-targets",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_channel_targets",
+                  "fields": [
+                    {"name": "channel_id", "expression": "`channel_id`"},
+                    {"name": "discovery_mode", "expression": "`discovery_mode`"},
+                    {"name": "updated_at", "expression": "`updated_at`"}
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "channel_id", "displayName": "Canal"},
+                  {"fieldName": "discovery_mode", "displayName": "Modo de descoberta"},
+                  {"fieldName": "updated_at", "displayName": "Última alteração"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Configuração por canal"}
+            }
+          },
+          "position": {"x": 0, "y": 12, "width": 6, "height": 6}
+        },
+        {
+          "widget": {
+            "name": "discovery-run-details",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_discovery_runs",
+                  "fields": [
+                    {"name": "started_at", "expression": "`started_at`"},
+                    {"name": "status", "expression": "`status`"},
+                    {"name": "channels_attempted", "expression": "`channels_attempted`"},
+                    {"name": "channels_failed", "expression": "`channels_failed`"},
+                    {"name": "videos_discovered", "expression": "`videos_discovered`"},
+                    {"name": "videos_registered", "expression": "`videos_registered`"},
+                    {"name": "error_message", "expression": "`error_message`"}
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "started_at", "displayName": "Início"},
+                  {"fieldName": "status", "displayName": "Status"},
+                  {"fieldName": "channels_attempted", "displayName": "Canais consultados"},
+                  {"fieldName": "channels_failed", "displayName": "Falhas de canal"},
+                  {"fieldName": "videos_discovered", "displayName": "Vídeos descobertos"},
+                  {"fieldName": "videos_registered", "displayName": "Vídeos cadastrados"},
+                  {"fieldName": "error_message", "displayName": "Erro"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Últimas execuções"}
+            }
+          },
+          "position": {"x": 6, "y": 12, "width": 6, "height": 6}
+        }
+      ]
+    },
+    {
+      "name": "filters",
+      "displayName": "Filtros",
+      "pageType": "PAGE_TYPE_GLOBAL_FILTERS",
+      "layoutVersion": "GRID_V1",
+      "layout": [
+        {
+          "widget": {
+            "name": "filter-started-at",
+            "queries": [
+              {
+                "name": "discovery_date_query",
+                "query": {
+                  "datasetName": "ds_discovery_runs",
+                  "fields": [
+                    {"name": "started_at", "expression": "`started_at`"}
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "encodings": {
+                "fields": [
+                  {"fieldName": "started_at", "queryName": "discovery_date_query"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Período de descoberta"}
+            }
+          },
+          "position": {"x": 0, "y": 0, "width": 6, "height": 2}
+        },
+        {
+          "widget": {
+            "name": "filter-status",
+            "queries": [
+              {
+                "name": "discovery_status_query",
+                "query": {
+                  "datasetName": "ds_discovery_runs",
+                  "fields": [
+                    {"name": "status", "expression": "`status`"}
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "status",
+                    "queryName": "discovery_status_query",
+                    "displayName": "Status"
+                  }
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Status"}
+            }
+          },
+          "position": {"x": 6, "y": 0, "width": 6, "height": 2}
+        }
+      ]
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "canvasBackgroundColor": {"light": "#FCFCFC", "dark": "#1F272D"},
+      "widgetBackgroundColor": {"light": "#FFFFFF", "dark": "#11171C"},
+      "widgetBorderColor": {"light": "#FFFFFF", "dark": "#11171C"},
+      "fontColor": {"light": "#11171C", "dark": "#E8ECF0"},
+      "selectionColor": {"light": "#21918C", "dark": "#5EC962"},
+      "visualizationColors": ["#440154", "#3B528B", "#21918C", "#5EC962", "#FDE725"],
+      "widgetHeaderAlignment": "LEFT"
+    },
+    "applyModeEnabled": false
+  }
+}

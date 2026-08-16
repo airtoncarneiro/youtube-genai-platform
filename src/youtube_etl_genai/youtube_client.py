@@ -53,6 +53,7 @@ _QUOTA_REASONS = frozenset({"dailyLimitExceeded", "quotaExceeded"})
 _API_COST_UNITS = {
     "videos": 1,
     "channels": 1,
+    "playlistItems": 1,
     "commentThreads": 1,
     "comments": 1,
 }
@@ -398,7 +399,7 @@ class YouTubeClient:
             "video_id": content_details.get("videoId"),
             "title": snippet.get("title"),
             "description": snippet.get("description"),
-            "published_at": content_details.get("videoPublishedAt"),
+            "published_at": _parse_rfc3339(content_details.get("videoPublishedAt")),
             "playlist_position": snippet.get("position"),
         }
 
