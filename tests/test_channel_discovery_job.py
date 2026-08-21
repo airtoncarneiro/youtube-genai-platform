@@ -13,7 +13,7 @@ def test_channel_discovery_orchestrates_ingestion_after_discovery() -> None:
     assert (
         """schedule:
         pause_status: UNPAUSED
-        quartz_cron_expression: "0 0 18 * * ?"
+        quartz_cron_expression: "0 0 20 * * ?"
         timezone_id: America/Sao_Paulo"""
         in discovery
     )

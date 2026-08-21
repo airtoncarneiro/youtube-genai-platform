@@ -15,6 +15,25 @@ COMMENT ON COLUMN youtube_lakehouse.control.channel_targets.discovery_mode IS 'M
 COMMENT ON COLUMN youtube_lakehouse.control.channel_targets.created_at IS 'Data e hora UTC de criação da configuração do canal';
 COMMENT ON COLUMN youtube_lakehouse.control.channel_targets.updated_at IS 'Data e hora UTC da última alteração da configuração do canal';
 
+MERGE INTO youtube_lakehouse.control.channel_targets AS target
+USING (
+  SELECT channel_id
+  FROM youtube_lakehouse.silver.channels
+  WHERE uploads_playlist_id IS NOT NULL
+) AS source
+ON target.channel_id = source.channel_id
+WHEN NOT MATCHED THEN INSERT (
+  channel_id,
+  discovery_mode,
+  created_at,
+  updated_at
+) VALUES (
+  source.channel_id,
+  'NONE',
+  current_timestamp(),
+  current_timestamp()
+);
+
 CREATE TABLE IF NOT EXISTS youtube_lakehouse.control.channel_discovery_runs (
   discovery_id STRING NOT NULL,
   started_at TIMESTAMP NOT NULL,

@@ -188,6 +188,9 @@ def test_channel_discovery_control_tables_are_created_and_documented() -> None:
     assert "discovery_mode STRING NOT NULL DEFAULT 'NONE'" in setup
     assert "channel_targets_discovery_mode" not in setup
     assert "'delta.feature.allowColumnDefaults' = 'supported'" in setup
+    assert "MERGE INTO youtube_lakehouse.control.channel_targets AS target" in setup
+    assert "FROM youtube_lakehouse.silver.channels" in setup
+    assert "WHEN NOT MATCHED THEN INSERT" in setup
     assert (
         "CREATE TABLE IF NOT EXISTS youtube_lakehouse.control.channel_discovery_runs"
         in setup

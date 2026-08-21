@@ -19,7 +19,7 @@ resources:
           default: ${var.secret_key}
       schedule:
         pause_status: UNPAUSED
-        quartz_cron_expression: "0 0 18 * * ?"
+        quartz_cron_expression: "0 0 20 * * ?"
         timezone_id: America/Sao_Paulo
       tasks:
         - task_key: discover_channel_videos
